@@ -208,6 +208,12 @@ export default {
 				let subConverterContent = await subConverterResponse.text();
 				if (订阅格式 == 'clash') {
 					subConverterContent = await clashFix(subConverterContent);
+					// 恢复被 subconverter 去掉的 emoji 国旗
+					try {
+						subConverterContent = restoreEmoji(subConverterContent, result);
+					} catch (e) {
+						console.log('emoji 恢复失败: ' + e.message);
+					}
 					// 将 inline rules 转换为 rule-providers 格式
 					try {
 						const rulesets = await parseSubConfig(subConfig);
@@ -473,6 +479,81 @@ function convertRulesToProviders(content, rulesets) {
 	const afterRules = lines.slice(rulesEndIndex).join(lineBreak);
 
 	return beforeRules + lineBreak + rpText + lineBreak + rulesText + afterRules;
+}
+
+// 从原始节点链接中提取 emoji 映射：baseName -> emoji
+function extractEmojiMap(nodeText) {
+	const emojiMap = {};
+	const lines = nodeText.split('\n');
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		let name = '';
+		try {
+			if (trimmed.startsWith('vmess://')) {
+				const b64 = trimmed.substring(8);
+				const json = JSON.parse(base64Decode(b64));
+				name = json.ps || '';
+			} else if (trimmed.startsWith('vless://') || trimmed.startsWith('trojan://') || trimmed.startsWith('ss://') || trimmed.startsWith('ssr://')) {
+				const hash = trimmed.lastIndexOf('#');
+				if (hash !== -1) {
+					name = decodeURIComponent(trimmed.substring(hash + 1));
+				}
+			}
+		} catch (e) {
+			continue;
+		}
+		if (!name) continue;
+
+		// 匹配开头的 emoji 国旗（两个区域指示符组成一个国旗）
+		const match = name.match(/^([\u{1F1E6}-\u{1F1FF}]{2}\s*)/u);
+		if (match) {
+			const emoji = match[1].trim();
+			const baseName = name.substring(match[1].length).trim();
+			if (baseName && !emojiMap[baseName]) {
+				emojiMap[baseName] = emoji;
+			}
+		}
+	}
+	return emojiMap;
+}
+
+// 恢复 Clash 配置中被 subconverter 去掉的 emoji 国旗
+function restoreEmoji(content, nodeText) {
+	const emojiMap = extractEmojiMap(nodeText);
+	if (Object.keys(emojiMap).length === 0) return content;
+
+	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
+
+	// 按 baseName 长度降序排列，避免短名称部分匹配长名称
+	const entries = Object.entries(emojiMap).sort((a, b) => b[0].length - a[0].length);
+
+	for (const [baseName, emoji] of entries) {
+		const withEmoji = `${emoji} ${baseName}`;
+
+		// 如果配置中已经有这个 emoji+名称，跳过
+		if (content.includes(withEmoji)) continue;
+		// 如果 baseName 不在配置中，跳过
+		if (!content.includes(baseName)) continue;
+
+		// 替换代理定义中的 name 字段: name: baseName,
+		content = content.replaceAll(`name: ${baseName},`, `name: ${withEmoji},`);
+		// 替换代理列表引用: - baseName (行尾)
+		content = content.replaceAll(`- ${baseName}${lineBreak}`, `- ${withEmoji}${lineBreak}`);
+
+		// 处理编号副本: baseName 2, baseName 3, ...
+		for (let i = 2; i <= 50; i++) {
+			const numbered = `${baseName} ${i}`;
+			const numberedWithEmoji = `${emoji} ${numbered}`;
+			if (content.includes(numberedWithEmoji)) continue;
+			if (!content.includes(numbered)) break;
+
+			content = content.replaceAll(`name: ${numbered},`, `name: ${numberedWithEmoji},`);
+			content = content.replaceAll(`- ${numbered}${lineBreak}`, `- ${numberedWithEmoji}${lineBreak}`);
+		}
+	}
+
+	return content;
 }
 
 async function proxyURL(proxyURL, url) {
