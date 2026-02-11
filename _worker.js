@@ -355,11 +355,20 @@ async function parseSubConfig(configUrl) {
 				const group = value.substring(0, commaIndex).trim();
 				const target = value.substring(commaIndex + 1).trim();
 				if (target.startsWith('[]')) {
-					// 内置规则如 []GEOIP,CN 或 []FINAL，保留为 inline rule
+					// 内置规则如 []GEOIP,CN,no-resolve 或 []FINAL，保留为 inline rule
 					rulesets.push({ group, type: 'inline', rule: target.substring(2) });
 				} else if (target.startsWith('http')) {
 					// 远程规则集 URL
-					rulesets.push({ group, type: 'url', url: target });
+					rulesets.push({ group, type: 'url', url: target, behavior: 'classical' });
+				} else if (target.startsWith('clash-domain:')) {
+					// clash-domain: 前缀，behavior 为 domain
+					rulesets.push({ group, type: 'url', url: target.substring('clash-domain:'.length), behavior: 'domain' });
+				} else if (target.startsWith('clash-ipcidr:')) {
+					// clash-ipcidr: 前缀，behavior 为 ipcidr
+					rulesets.push({ group, type: 'url', url: target.substring('clash-ipcidr:'.length), behavior: 'ipcidr' });
+				} else if (target.startsWith('clash-classical:')) {
+					// clash-classical: 前缀，behavior 为 classical
+					rulesets.push({ group, type: 'url', url: target.substring('clash-classical:'.length), behavior: 'classical' });
 				}
 			}
 		}
@@ -405,10 +414,14 @@ function convertRulesToProviders(content, rulesets) {
 
 	for (const ruleset of rulesets) {
 		if (ruleset.type === 'inline') {
-			// GEOIP,CN / FINAL 等内置规则
+			// GEOIP,CN / GEOIP,CN,no-resolve / FINAL 等内置规则
 			const rule = ruleset.rule;
 			if (rule === 'FINAL') {
 				newRules.push(`  - MATCH,${ruleset.group}`);
+			} else if (rule.endsWith(',no-resolve')) {
+				// GEOIP,CN,no-resolve -> GEOIP,CN,GROUP,no-resolve
+				const ruleBase = rule.slice(0, -',no-resolve'.length);
+				newRules.push(`  - ${ruleBase},${ruleset.group},no-resolve`);
 			} else {
 				newRules.push(`  - ${rule},${ruleset.group}`);
 			}
@@ -424,7 +437,7 @@ function convertRulesToProviders(content, rulesets) {
 			providerIndex++;
 
 			// 根据 URL 中的文件扩展名和路径判断 behavior
-			let behavior = 'classical';  // 默认使用 classical，最通用
+			let behavior = ruleset.behavior || 'classical';  // 使用 INI 指定的 behavior，默认 classical
 
 			ruleProviders[providerName] = {
 				type: 'http',
