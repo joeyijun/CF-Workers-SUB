@@ -335,26 +335,37 @@ function convertRulesToProviders(content) {
 		let lines = content.includes('\r\n') ? content.split('\r\n') : content.split('\n');
 		
 		let inRulesSection = false;
-		let beforeRules = [];
+		let inRuleProvidersSection = false;
+		let beforeRuleProviders = [];
+		let ruleProviders = [];
 		let rules = [];
 		let afterRules = [];
-		let currentSection = beforeRules;
+		let currentSection = beforeRuleProviders;
 		
 		// 解析配置文件，分离各个部分
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
 			const trimmedLine = line.trim();
 			
-			if (trimmedLine === 'rules:') {
+			if (trimmedLine === 'rule-providers:' || trimmedLine.startsWith('rule-providers:')) {
+				inRuleProvidersSection = true;
+				inRulesSection = false;
+				ruleProviders.push(line);
+				continue;
+			} else if (trimmedLine === 'rules:') {
 				inRulesSection = true;
+				inRuleProvidersSection = false;
 				currentSection = afterRules;
 				continue;
 			} else if (trimmedLine.startsWith('proxies:') || trimmedLine.startsWith('proxy-groups:') || 
 			           trimmedLine.startsWith('dns:') || trimmedLine.startsWith('hosts:')) {
 				inRulesSection = false;
+				inRuleProvidersSection = false;
 			}
 			
-			if (inRulesSection && trimmedLine.startsWith('- ')) {
+			if (inRuleProvidersSection) {
+				ruleProviders.push(line);
+			} else if (inRulesSection && trimmedLine.startsWith('- ')) {
 				rules.push(trimmedLine.substring(2).trim());
 			} else {
 				currentSection.push(line);
@@ -366,91 +377,103 @@ function convertRulesToProviders(content) {
 			return content;
 		}
 		
-		// 分析规则并创建 rule-providers
-		const ruleProviderMap = new Map();
-		const simpleRules = []; // 保留的简单规则（如GEOIP, FINAL等）
+		// 如果已经有 rule-providers 定义，则只需要转换 rules 部分
+		const hasRuleProviders = ruleProviders.length > 0;
 		
-		// 定义 rule-provider 映射关系
-		const providerMapping = [
-			{ name: 'reject', url: 'https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/reject.txt', behavior: 'domain', policy: 'REJECT' },
-			{ name: 'reject-ads', url: 'https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Clash.yaml', behavior: 'domain', policy: 'REJECT' },
-			{ name: 'private', url: 'https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/private.txt', behavior: 'domain', policy: 'DIRECT' },
-			{ name: 'direct', url: 'https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/direct.txt', behavior: 'domain', policy: 'DIRECT' },
-			{ name: 'apple', url: 'https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/apple.txt', behavior: 'domain', policy: 'DIRECT' },
-			{ name: 'google-cn', url: 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/GoogleCNProxyIP.list', behavior: 'classical', policy: '🚀 节点选择' },
-			{ name: 'onedrive', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/OneDrive/OneDrive.list', behavior: 'classical', policy: 'Ⓜ️ Onedrive' },
-			{ name: 'private-tracker', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/PrivateTracker/PrivateTracker.list', behavior: 'classical', policy: 'DIRECT' },
-			{ name: 'scholar', url: 'https://gist.githubusercontent.com/joeyijun/5fa966a32a9dc8f2c4a90430a8808c5f/raw/scholar_direct_rules.list', behavior: 'classical', policy: 'DIRECT' },
-			{ name: 'remote-desktop', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/RemoteDesktop/RemoteDesktop.list', behavior: 'classical', policy: 'DIRECT' },
-			{ name: 'china-company-ip', url: 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/ChinaCompanyIp.list', behavior: 'classical', policy: 'DIRECT' }
-		];
+		// 分析 rules，保留必要的简单规则
+		const simpleRules = [];
+		const ruleSetRules = [];
 		
-		// 处理规则
 		for (const rule of rules) {
-			// 保留特殊规则
-			if (rule.startsWith('GEOIP,') || rule.includes('FINAL') || rule.includes('MATCH')) {
+			// 保留特殊规则类型
+			if (rule.startsWith('GEOIP,') || 
+			    rule.includes('FINAL') || 
+			    rule.includes('MATCH') ||
+			    rule.startsWith('RULE-SET,')) {
 				simpleRules.push(rule);
-			} else if (rule.startsWith('DOMAIN-SUFFIX,xn--ngstr-lra8j.com') || 
-			           rule.startsWith('DOMAIN-SUFFIX,services.googleapis.cn')) {
+			} else if (rule.startsWith('DOMAIN-SUFFIX,') && rule.split(',').length === 3) {
+				// 保留简单的自定义域名规则
 				simpleRules.push(rule);
-			}
-			// 其他规则已经被转换为 rule-providers，不需要单独处理
-		}
-		
-		// 构建新的配置
-		let newContent = beforeRules.join('\n') + '\n';
-		
-		// 添加 rule-providers 部分
-		newContent += '\nrule-providers:\n';
-		for (const provider of providerMapping) {
-			newContent += `  ${provider.name}:\n`;
-			newContent += `    type: http\n`;
-			newContent += `    behavior: ${provider.behavior}\n`;
-			newContent += `    url: "${provider.url}"\n`;
-			newContent += `    path: ./ruleset/${provider.name}.yaml\n`;
-			newContent += `    interval: 86400\n`;
-		}
-		
-		// 添加 rules 部分
-		newContent += '\nrules:\n';
-		
-		// 添加保留的简单规则
-		for (const rule of simpleRules) {
-			if (rule.startsWith('DOMAIN-SUFFIX,xn--ngstr-lra8j.com') || 
-			    rule.startsWith('DOMAIN-SUFFIX,services.googleapis.cn')) {
-				newContent += `  - ${rule}\n`;
+			} else if (rule.startsWith('DOMAIN,') && rule.split(',').length === 3) {
+				// 保留简单的域名规则
+				simpleRules.push(rule);
+			} else {
+				// 其他规则可以被 rule-providers 替代
+				ruleSetRules.push(rule);
 			}
 		}
 		
-		// 按顺序添加 RULE-SET
-		const ruleSetOrder = [
-			{ name: 'reject', policy: 'REJECT' },
-			{ name: 'reject-ads', policy: 'REJECT' },
-			{ name: 'private', policy: 'DIRECT' },
-			{ name: 'direct', policy: 'DIRECT' },
-			{ name: 'private-tracker', policy: 'DIRECT' },
-			{ name: 'scholar', policy: 'DIRECT' },
-			{ name: 'remote-desktop', policy: 'DIRECT' },
-			{ name: 'apple', policy: 'DIRECT' },
-			{ name: 'onedrive', policy: 'Ⓜ️ Onedrive' },
-			{ name: 'google-cn', policy: '🚀 节点选择' },
-			{ name: 'china-company-ip', policy: 'DIRECT' }
-		];
-		
-		for (const ruleSet of ruleSetOrder) {
-			newContent += `  - RULE-SET,${ruleSet.name},${ruleSet.policy}\n`;
-		}
-		
-		// 添加 GEOIP 和 FINAL 规则
-		for (const rule of simpleRules) {
-			if (rule.startsWith('GEOIP,') || rule.includes('FINAL') || rule.includes('MATCH')) {
-				newContent += `  - ${rule}\n`;
+		// 如果原本就有 rule-providers，并且大部分规则都可以用 RULE-SET 替代
+		if (hasRuleProviders && ruleSetRules.length > 20) {
+			// 提取 rule-providers 的名称
+			const providerNames = [];
+			for (const line of ruleProviders) {
+				const trimmed = line.trim();
+				if (trimmed && !trimmed.startsWith('rule-providers:') && !trimmed.includes(':') === false) {
+					const match = trimmed.match(/^([a-zA-Z0-9_-]+):/);
+					if (match) {
+						providerNames.push(match[1]);
+					}
+				}
 			}
+			
+			// 构建新的配置
+			let newContent = beforeRuleProviders.join('\n') + '\n';
+			newContent += ruleProviders.join('\n') + '\n';
+			newContent += '\nrules:\n';
+			
+			// 添加保留的简单规则
+			for (const rule of simpleRules) {
+				if (rule.startsWith('RULE-SET,')) {
+					// 已经是 RULE-SET，直接保留
+					newContent += `  - ${rule}\n`;
+				} else if (rule.startsWith('DOMAIN-SUFFIX,') || rule.startsWith('DOMAIN,')) {
+					// 简单域名规则保留在最前面
+					newContent += `  - ${rule}\n`;
+				}
+			}
+			
+			// 添加 RULE-SET 引用（如果规则中还没有）
+			const existingRuleSets = simpleRules.filter(r => r.startsWith('RULE-SET,')).map(r => {
+				const parts = r.split(',');
+				return parts[1];
+			});
+			
+			for (const providerName of providerNames) {
+				if (!existingRuleSets.includes(providerName)) {
+					// 根据 provider 名称推断策略
+					let policy = '🚀 节点选择';
+					if (providerName.includes('reject') || providerName.includes('ad')) {
+						policy = 'REJECT';
+					} else if (providerName.includes('direct') || providerName.includes('cn') || 
+					           providerName.includes('china') || providerName.includes('private')) {
+						policy = 'DIRECT';
+					}
+					newContent += `  - RULE-SET,${providerName},${policy}\n`;
+				}
+			}
+			
+			// 添加已有的 RULE-SET 规则
+			for (const rule of simpleRules) {
+				if (rule.startsWith('RULE-SET,')) {
+					newContent += `  - ${rule}\n`;
+				}
+			}
+			
+			// 最后添加 GEOIP 和 FINAL 规则
+			for (const rule of simpleRules) {
+				if (rule.startsWith('GEOIP,') || rule.includes('FINAL') || rule.includes('MATCH')) {
+					newContent += `  - ${rule}\n`;
+				}
+			}
+			
+			newContent += afterRules.join('\n');
+			
+			return newContent;
 		}
 		
-		newContent += afterRules.join('\n');
-		
-		return newContent;
+		// 如果没有 rule-providers 或规则较少，返回原内容
+		return content;
 		
 	} catch (error) {
 		console.error('转换 rule-providers 失败:', error);
