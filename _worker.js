@@ -206,7 +206,18 @@ export default {
 				const subConverterResponse = await fetch(subConverterUrl, { headers: { 'User-Agent': userAgentHeader } });//订阅转换
 				if (!subConverterResponse.ok) return new Response(base64Data, { headers: responseHeaders });
 				let subConverterContent = await subConverterResponse.text();
-				if (订阅格式 == 'clash') subConverterContent = await clashFix(subConverterContent);
+				if (订阅格式 == 'clash') {
+					subConverterContent = await clashFix(subConverterContent);
+					// 将 inline rules 转换为 rule-providers 格式
+					try {
+						const rulesets = await parseSubConfig(subConfig);
+						if (rulesets && rulesets.length > 0) {
+							subConverterContent = convertRulesToProviders(subConverterContent, rulesets);
+						}
+					} catch (e) {
+						console.log('rule-providers 转换失败，使用原始 rules: ' + e.message);
+					}
+				}
 				// 只有非浏览器订阅才会返回SUBNAME
 				if (!userAgent.includes('mozilla')) responseHeaders["Content-Disposition"] = `attachment; filename*=utf-8''${encodeURIComponent(FileName)}`;
 				return new Response(subConverterContent, { headers: responseHeaders });
@@ -324,6 +335,131 @@ function clashFix(content) {
 		content = result;
 	}
 	return content;
+}
+
+// 解析 subConfig INI 配置文件，提取 ruleset 条目
+async function parseSubConfig(configUrl) {
+	try {
+		const response = await fetch(configUrl);
+		if (!response.ok) return [];
+		const text = await response.text();
+		const lines = text.split(/\r?\n/);
+		const rulesets = [];
+		for (const line of lines) {
+			const trimmed = line.trim();
+			if (trimmed.startsWith(';') || trimmed === '') continue;
+			if (trimmed.startsWith('ruleset=')) {
+				const value = trimmed.substring('ruleset='.length);
+				const commaIndex = value.indexOf(',');
+				if (commaIndex === -1) continue;
+				const group = value.substring(0, commaIndex).trim();
+				const target = value.substring(commaIndex + 1).trim();
+				if (target.startsWith('[]')) {
+					// 内置规则如 []GEOIP,CN 或 []FINAL，保留为 inline rule
+					rulesets.push({ group, type: 'inline', rule: target.substring(2) });
+				} else if (target.startsWith('http')) {
+					// 远程规则集 URL
+					rulesets.push({ group, type: 'url', url: target });
+				}
+			}
+		}
+		return rulesets;
+	} catch (e) {
+		console.log('解析 subConfig 失败: ' + e.message);
+		return [];
+	}
+}
+
+// 将 Clash 配置中的 inline rules 替换为 rule-providers 格式
+function convertRulesToProviders(content, rulesets) {
+	// 检查是否已经有 rule-providers（避免重复转换）
+	if (content.includes('rule-providers:')) return content;
+	// 检查是否有 rules 段
+	if (!content.includes('rules:')) return content;
+
+	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
+	const lines = content.split(lineBreak);
+
+	// 找到 rules: 段的位置
+	let rulesStartIndex = -1;
+	let rulesEndIndex = -1;
+	for (let i = 0; i < lines.length; i++) {
+		if (lines[i].trim() === 'rules:') {
+			rulesStartIndex = i;
+			continue;
+		}
+		if (rulesStartIndex !== -1 && rulesEndIndex === -1) {
+			// rules 段中的行以 "  -" 开头
+			if (!lines[i].trim().startsWith('-') && lines[i].trim() !== '') {
+				rulesEndIndex = i;
+			}
+		}
+	}
+	if (rulesStartIndex === -1) return content;
+	if (rulesEndIndex === -1) rulesEndIndex = lines.length;
+
+	// 生成 rule-providers 和新的 rules
+	const ruleProviders = {};
+	const newRules = [];
+	let providerIndex = 0;
+
+	for (const ruleset of rulesets) {
+		if (ruleset.type === 'inline') {
+			// GEOIP,CN / FINAL 等内置规则
+			const rule = ruleset.rule;
+			if (rule === 'FINAL') {
+				newRules.push(`  - MATCH,${ruleset.group}`);
+			} else {
+				newRules.push(`  - ${rule},${ruleset.group}`);
+			}
+		} else if (ruleset.type === 'url') {
+			// 远程规则集 -> rule-provider
+			const url = ruleset.url;
+			// 从 URL 提取 provider 名称
+			let providerName = url.split('/').pop().replace(/\.list$|\.yaml$|\.txt$/i, '').toLowerCase();
+			// 确保名称唯一
+			if (ruleProviders[providerName]) {
+				providerName = providerName + '_' + providerIndex;
+			}
+			providerIndex++;
+
+			// 根据 URL 中的文件扩展名和路径判断 behavior
+			let behavior = 'classical';  // 默认使用 classical，最通用
+
+			ruleProviders[providerName] = {
+				type: 'http',
+				behavior: behavior,
+				url: url,
+				path: `./ruleset/${providerName}.yaml`,
+				interval: 86400
+			};
+
+			newRules.push(`  - RULE-SET,${providerName},${ruleset.group}`);
+		}
+	}
+
+	// 构建 rule-providers YAML 文本
+	let rpText = 'rule-providers:' + lineBreak;
+	for (const [name, provider] of Object.entries(ruleProviders)) {
+		rpText += `  ${name}:` + lineBreak;
+		rpText += `    type: ${provider.type}` + lineBreak;
+		rpText += `    behavior: ${provider.behavior}` + lineBreak;
+		rpText += `    url: "${provider.url}"` + lineBreak;
+		rpText += `    path: ${provider.path}` + lineBreak;
+		rpText += `    interval: ${provider.interval}` + lineBreak;
+	}
+
+	// 构建新的 rules 段
+	let rulesText = 'rules:' + lineBreak;
+	for (const rule of newRules) {
+		rulesText += rule + lineBreak;
+	}
+
+	// 替换原始内容
+	const beforeRules = lines.slice(0, rulesStartIndex).join(lineBreak);
+	const afterRules = lines.slice(rulesEndIndex).join(lineBreak);
+
+	return beforeRules + lineBreak + rpText + lineBreak + rulesText + afterRules;
 }
 
 async function proxyURL(proxyURL, url) {
