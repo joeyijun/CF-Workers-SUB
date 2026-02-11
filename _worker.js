@@ -211,8 +211,10 @@ export default {
 					// 恢复被 subconverter 去掉的 emoji 国旗
 					try {
 						subConverterContent = restoreEmoji(subConverterContent, result);
+						// 根据恢复的 emoji 重新分配节点到对应国家组
+						subConverterContent = fixProxyGroups(subConverterContent);
 					} catch (e) {
-						console.log('emoji 恢复失败: ' + e.message);
+						console.log('emoji/分组恢复失败: ' + e.message);
 					}
 					// 将 inline rules 转换为 rule-providers 格式
 					try {
@@ -554,6 +556,95 @@ function restoreEmoji(content, nodeText) {
 	}
 
 	return content;
+}
+
+// 根据代理名称中的 emoji 国旗，重新分配节点到对应的国家代理组
+function fixProxyGroups(content) {
+	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
+	const lines = content.split(lineBreak);
+
+	// 第1步：从 proxies: 段提取所有代理名称
+	const allProxyNames = [];
+	let inProxiesSection = false;
+	for (let i = 0; i < lines.length; i++) {
+		const trimmed = lines[i].trim();
+		if (trimmed === 'proxies:') { inProxiesSection = true; continue; }
+		if (inProxiesSection && trimmed !== '' && !trimmed.startsWith('-') && !trimmed.startsWith('#')) {
+			inProxiesSection = false; continue;
+		}
+		if (inProxiesSection) {
+			const nameMatch = lines[i].match(/name:\s*"?([^",}\r\n]+)"?\s*[,}]/);
+			if (nameMatch) allProxyNames.push(nameMatch[1].trim());
+		}
+	}
+
+	// 第2步：按 emoji 国旗分组代理名称
+	const flagToProxies = {};
+	for (const name of allProxyNames) {
+		const match = name.match(/^([\u{1F1E6}-\u{1F1FF}]{2})\s/u);
+		if (match) {
+			const flag = match[1];
+			if (!flagToProxies[flag]) flagToProxies[flag] = [];
+			flagToProxies[flag].push(name);
+		}
+	}
+	if (Object.keys(flagToProxies).length === 0) return content;
+
+	// 第3步：遍历配置行，找到国家代理组并替换其 proxies 列表
+	const result = [];
+	let currentGroupFlag = null;
+	let inGroupProxiesList = false;
+	let proxiesIndent = '';
+	let addedNewProxies = false;
+
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		const trimmed = line.trim();
+
+		// 检测新的 proxy-group 开始
+		if (trimmed.startsWith('- name:') || trimmed.startsWith('- {name:')) {
+			inGroupProxiesList = false;
+			addedNewProxies = false;
+			currentGroupFlag = null;
+
+			// 检查是否是国家组（名称以国旗 emoji 开头）
+			const flagMatch = trimmed.match(/name:\s*"?([\u{1F1E6}-\u{1F1FF}]{2})\s/u);
+			if (flagMatch && flagToProxies[flagMatch[1]]) {
+				currentGroupFlag = flagMatch[1];
+			}
+		}
+
+		// 检测国家组内的 proxies: 子段
+		if (currentGroupFlag && trimmed === 'proxies:') {
+			inGroupProxiesList = true;
+			proxiesIndent = line.match(/^(\s*)/)[1];
+			result.push(line);
+			// 添加所有匹配国旗的代理
+			for (const proxyName of flagToProxies[currentGroupFlag]) {
+				result.push(`${proxiesIndent}  - ${proxyName}`);
+			}
+			addedNewProxies = true;
+			continue;
+		}
+
+		// 跳过被替换的国家组的旧代理列表项
+		if (inGroupProxiesList && addedNewProxies) {
+			const lineIndent = line.match(/^(\s*)/)[1].length;
+			const expectedIndent = proxiesIndent.length + 2;
+			if (lineIndent >= expectedIndent && trimmed.startsWith('-')) {
+				// 这是旧的代理列表项，跳过
+				continue;
+			} else {
+				// 代理列表结束
+				inGroupProxiesList = false;
+				currentGroupFlag = null;
+			}
+		}
+
+		result.push(line);
+	}
+
+	return result.join(lineBreak);
 }
 
 async function proxyURL(proxyURL, url) {
