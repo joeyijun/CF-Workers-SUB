@@ -11,8 +11,8 @@ let total = 99;//TB
 let timestamp = 4102329600000;//2099-12-31
 
 // --------------------------------------------------------------------------------
-// 【重要】如果你想用自定义的INI规则（生成 rule-providers），请将你的INI文件上传到
-// GitHub Gist 或其他直链地址，并将链接填入下方 subConfig 引号中。
+// 【注意】这里必须填入你的 INI 配置文件的【在线直链】(Raw URL)
+// 不要直接在这里粘贴 INI 的内容！
 // --------------------------------------------------------------------------------
 let subConfig = "https://raw.githubusercontent.com/cmliu/ACL4SSR/main/Clash/config/ACL4SSR_Online_MultiCountry.ini"; 
 // --------------------------------------------------------------------------------
@@ -194,9 +194,9 @@ export default {
 			if (订阅格式 == 'base64' || token == fakeToken) {
                 return new Response(base64Data, { headers: responseHeaders });
             } else if (订阅格式 == 'clash') {
-                // 【修改关键】加入了 ver=4 强制开启 Premium/Meta 模式，配合 rule_provider=true 才能生效
-                // 加入了 overwrite_original_rules=true 确保配置生效
-                subConverterUrl = `${subProtocol}://${subConverter}/sub?target=clash&ver=4&url=${encodeURIComponent(订阅转换URL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=false&scv=true&fdn=false&sort=false&new_name=true&rule_provider=true&overwrite_original_rules=true`;
+                // 【修改重点】这里将 target=clash 改为了 target=clash&ver=meta
+                // 这会强制使用 Clash Meta (Mihomo) 格式，从而支持 rule-providers
+                subConverterUrl = `${subProtocol}://${subConverter}/sub?target=clash&ver=meta&url=${encodeURIComponent(订阅转换URL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=false&scv=true&fdn=false&sort=false&new_name=true&rule_provider=true`;
 			} else if (订阅格式 == 'singbox') {
 				subConverterUrl = `${subProtocol}://${subConverter}/sub?target=singbox&url=${encodeURIComponent(订阅转换URL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=false&scv=true&fdn=false&sort=false&new_name=true`;
 			} else if (订阅格式 == 'surge') {
@@ -300,7 +300,6 @@ async function MD5MD5(text) {
 }
 
 function clashFix(content) {
-	// 仅保留 Wireguard 修复逻辑
     if (content.includes('wireguard') && !content.includes('remote-dns-resolve')) {
         let lines = content.includes('\r\n') ? content.split('\r\n') : content.split('\n');
         let result = "";
@@ -318,7 +317,6 @@ function clashFix(content) {
     return content;
 }
 
-// 剩余的辅助函数（ProxyURL等）保持不变，篇幅原因未重复粘贴，请保留原文件剩余部分（add, kv等）
 async function proxyURL(proxyURL, url) {
 	const URLs = await ADD(proxyURL);
 	const fullURL = URLs[Math.floor(Math.random() * URLs.length)];
@@ -447,7 +445,6 @@ async function 迁移地址列表(env, txt = 'ADD.txt') {
 async function KV(request, env, txt = 'ADD.txt', guest) {
 	const url = new URL(request.url);
 	try {
-		// POST请求处理
 		if (request.method === "POST") {
 			if (!env.KV) return new Response("未绑定KV空间", { status: 400 });
 			try {
@@ -459,11 +456,8 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 				return new Response("保存失败: " + error.message, { status: 500 });
 			}
 		}
-
-		// GET请求部分
 		let content = '';
 		let hasKV = !!env.KV;
-
 		if (hasKV) {
 			try {
 				content = await env.KV.get(txt) || '';
@@ -483,9 +477,9 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 					<style>
 						body {
 							margin: 0;
-							padding: 15px; /* 调整padding */
+							padding: 15px; 
 							box-sizing: border-box;
-							font-size: 13px; /* 设置全局字体大小 */
+							font-size: 13px;
 						}
 						.editor-container {
 							width: 100%;
@@ -494,9 +488,9 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 						}
 						.editor {
 							width: 100%;
-							height: 300px; /* 调整高度 */
-							margin: 15px 0; /* 调整margin */
-							padding: 10px; /* 调整padding */
+							height: 300px;
+							margin: 15px 0;
+							padding: 10px;
 							box-sizing: border-box;
 							border: 1px solid #ccc;
 							border-radius: 4px;
@@ -506,13 +500,13 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 							resize: none;
 						}
 						.save-container {
-							margin-top: 8px; /* 调整margin */
+							margin-top: 8px;
 							display: flex;
 							align-items: center;
-							gap: 10px; /* 调整gap */
+							gap: 10px;
 						}
 						.save-btn, .back-btn {
-							padding: 6px 15px; /* 调整padding */
+							padding: 6px 15px;
 							color: white;
 							border: none;
 							border-radius: 4px;
@@ -618,12 +612,12 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 						qrcodeDiv.innerHTML = '';
 						new QRCode(qrcodeDiv, {
 							text: text,
-							width: 220, // 调整宽度
-							height: 220, // 调整高度
-							colorDark: "#000000", // 二维码颜色
-							colorLight: "#ffffff", // 背景颜色
-							correctLevel: QRCode.CorrectLevel.Q, // 设置纠错级别
-							scale: 1 // 调整像素颗粒度
+							width: 220, 
+							height: 220, 
+							colorDark: "#000000", 
+							colorLight: "#ffffff", 
+							correctLevel: QRCode.CorrectLevel.Q, 
+							scale: 1 
 						});
 					}
 						
@@ -648,17 +642,13 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 								const updateButtonText = (step) => {
 									button.textContent = \`保存中: \${step}\`;
 								};
-								// 检测是否为iOS设备
 								const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-								
-								// 仅在非iOS设备上执行replaceFullwidthColon
 								if (!isIOS) {
 									replaceFullwidthColon();
 								}
 								updateButtonText('开始保存');
 								button.disabled = true;
 
-								// 获取textarea内容和原始内容
 								const textarea = document.getElementById('content');
 								if (!textarea) {
 									throw new Error('找不到文本编辑区域');
@@ -754,7 +744,6 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 						}
 					}
 			
-					// 初始化 noticeContent 的 display 属性
 					document.addEventListener('DOMContentLoaded', () => {
 						document.getElementById('noticeContent').style.display = 'none';
 					});
@@ -773,4 +762,5 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 			headers: { "Content-Type": "text/plain;charset=utf-8" }
 		});
 	}
+}
 }
