@@ -334,150 +334,216 @@ function convertRulesToProviders(content) {
 	try {
 		let lines = content.includes('\r\n') ? content.split('\r\n') : content.split('\n');
 		
-		let inRulesSection = false;
-		let inRuleProvidersSection = false;
-		let beforeRuleProviders = [];
-		let ruleProviders = [];
-		let rules = [];
-		let afterRules = [];
-		let currentSection = beforeRuleProviders;
+		// 查找关键section的位置
+		let ruleProvidersStart = -1;
+		let ruleProvidersEnd = -1;
+		let rulesStart = -1;
+		let rulesEnd = -1;
 		
-		// 解析配置文件，分离各个部分
 		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i];
-			const trimmedLine = line.trim();
+			const trimmed = lines[i].trim();
 			
-			if (trimmedLine === 'rule-providers:' || trimmedLine.startsWith('rule-providers:')) {
-				inRuleProvidersSection = true;
-				inRulesSection = false;
-				ruleProviders.push(line);
-				continue;
-			} else if (trimmedLine === 'rules:') {
-				inRulesSection = true;
-				inRuleProvidersSection = false;
-				currentSection = afterRules;
-				continue;
-			} else if (trimmedLine.startsWith('proxies:') || trimmedLine.startsWith('proxy-groups:') || 
-			           trimmedLine.startsWith('dns:') || trimmedLine.startsWith('hosts:')) {
-				inRulesSection = false;
-				inRuleProvidersSection = false;
+			if (trimmed === 'rule-providers:' || trimmed.startsWith('rule-providers:')) {
+				ruleProvidersStart = i;
+			} else if (ruleProvidersStart !== -1 && ruleProvidersEnd === -1) {
+				// 检查是否 rule-providers 部分结束
+				if (trimmed && !trimmed.startsWith(' ') && !trimmed.startsWith('\t') && trimmed.includes(':')) {
+					ruleProvidersEnd = i;
+				}
 			}
 			
-			if (inRuleProvidersSection) {
-				ruleProviders.push(line);
-			} else if (inRulesSection && trimmedLine.startsWith('- ')) {
-				rules.push(trimmedLine.substring(2).trim());
-			} else {
-				currentSection.push(line);
+			if (trimmed === 'rules:') {
+				rulesStart = i;
+			} else if (rulesStart !== -1 && rulesEnd === -1) {
+				// 检查是否 rules 部分结束(遇到下一个主section或文件结束)
+				if (trimmed && !trimmed.startsWith('-') && !trimmed.startsWith(' ') && !trimmed.startsWith('\t') && trimmed.includes(':')) {
+					rulesEnd = i;
+				}
 			}
 		}
 		
-		// 如果规则数量少于50条，不进行转换
-		if (rules.length < 50) {
+		// 如果没有找到 rules 部分，返回原内容
+		if (rulesStart === -1) {
 			return content;
 		}
 		
-		// 如果已经有 rule-providers 定义，则只需要转换 rules 部分
-		const hasRuleProviders = ruleProviders.length > 0;
+		// 如果 rules 部分没有结束标记，则到文件末尾
+		if (rulesEnd === -1) {
+			rulesEnd = lines.length;
+		}
 		
-		// 分析 rules，保留必要的简单规则
+		// 提取 rules
+		const rules = [];
+		for (let i = rulesStart + 1; i < rulesEnd; i++) {
+			const trimmed = lines[i].trim();
+			if (trimmed.startsWith('- ')) {
+				rules.push(trimmed.substring(2).trim());
+			}
+		}
+		
+		// 如果规则少于50条，不转换
+		if (rules.length < 50) {
+			console.log(`规则数量 ${rules.length} 少于50条，不进行转换`);
+			return content;
+		}
+		
+		console.log(`检测到 ${rules.length} 条规则，开始转换为 rule-providers 格式`);
+		
+		// 提取已有的 rule-providers 名称
+		const existingProviders = new Map();
+		if (ruleProvidersStart !== -1) {
+			for (let i = ruleProvidersStart + 1; i < (ruleProvidersEnd === -1 ? rulesStart : ruleProvidersEnd); i++) {
+				const trimmed = lines[i].trim();
+				const match = trimmed.match(/^([a-zA-Z0-9_-]+):/);
+				if (match) {
+					const providerName = match[1];
+					// 提取这个provider的所有配置
+					const providerLines = [lines[i]];
+					let j = i + 1;
+					while (j < lines.length && (lines[j].startsWith('    ') || lines[j].startsWith('\t\t'))) {
+						providerLines.push(lines[j]);
+						j++;
+					}
+					existingProviders.set(providerName, providerLines);
+					i = j - 1;
+				}
+			}
+		}
+		
+		console.log(`找到 ${existingProviders.size} 个已存在的 rule-providers`);
+		
+		// 分析规则，分类保留
 		const simpleRules = [];
-		const ruleSetRules = [];
+		const ruleSetReferences = [];
 		
 		for (const rule of rules) {
-			// 保留特殊规则类型
-			if (rule.startsWith('GEOIP,') || 
-			    rule.includes('FINAL') || 
-			    rule.includes('MATCH') ||
-			    rule.startsWith('RULE-SET,')) {
+			if (rule.startsWith('RULE-SET,')) {
+				// 已经是 RULE-SET 引用，保留
+				ruleSetReferences.push(rule);
+			} else if (rule.startsWith('GEOIP,') || rule.includes('FINAL') || rule.includes('MATCH')) {
+				// 特殊规则，保留
 				simpleRules.push(rule);
-			} else if (rule.startsWith('DOMAIN-SUFFIX,') && rule.split(',').length === 3) {
-				// 保留简单的自定义域名规则
-				simpleRules.push(rule);
-			} else if (rule.startsWith('DOMAIN,') && rule.split(',').length === 3) {
-				// 保留简单的域名规则
-				simpleRules.push(rule);
-			} else {
-				// 其他规则可以被 rule-providers 替代
-				ruleSetRules.push(rule);
+			} else if (rule.startsWith('DOMAIN-SUFFIX,') || rule.startsWith('DOMAIN,')) {
+				// 简单域名规则，检查是否是自定义的
+				const parts = rule.split(',');
+				if (parts.length === 3 && parts[1].length < 50) {
+					// 短域名规则，可能是自定义的，保留
+					simpleRules.push(rule);
+				}
+			}
+			// 其他规则被省略，因为应该被 rule-providers 覆盖
+		}
+		
+		// 重新构建配置
+		const newLines = [];
+		
+		// 1. 添加 rules 之前的所有内容
+		for (let i = 0; i < (ruleProvidersStart !== -1 ? ruleProvidersStart : rulesStart); i++) {
+			newLines.push(lines[i]);
+		}
+		
+		// 2. 添加或保留 rule-providers 部分
+		if (existingProviders.size > 0) {
+			newLines.push('rule-providers:');
+			for (const [name, providerLines] of existingProviders) {
+				providerLines.forEach(line => newLines.push(line));
+			}
+		} else {
+			// 没有已存在的 providers，创建基本的
+			newLines.push('');
+			newLines.push('rule-providers:');
+			newLines.push('  reject:');
+			newLines.push('    type: http');
+			newLines.push('    behavior: domain');
+			newLines.push('    url: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/reject.txt"');
+			newLines.push('    path: ./ruleset/reject.yaml');
+			newLines.push('    interval: 86400');
+			newLines.push('  direct:');
+			newLines.push('    type: http');
+			newLines.push('    behavior: domain');
+			newLines.push('    url: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/direct.txt"');
+			newLines.push('    path: ./ruleset/direct.yaml');
+			newLines.push('    interval: 86400');
+			newLines.push('  proxy:');
+			newLines.push('    type: http');
+			newLines.push('    behavior: domain');
+			newLines.push('    url: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/proxy.txt"');
+			newLines.push('    path: ./ruleset/proxy.yaml');
+			newLines.push('    interval: 86400');
+		}
+		
+		// 3. 添加简化的 rules 部分
+		newLines.push('');
+		newLines.push('rules:');
+		
+		// 首先添加自定义的简单规则
+		for (const rule of simpleRules) {
+			if (rule.startsWith('DOMAIN-SUFFIX,') || rule.startsWith('DOMAIN,')) {
+				newLines.push(`  - ${rule}`);
 			}
 		}
 		
-		// 如果原本就有 rule-providers，并且大部分规则都可以用 RULE-SET 替代
-		if (hasRuleProviders && ruleSetRules.length > 20) {
-			// 提取 rule-providers 的名称
-			const providerNames = [];
-			for (const line of ruleProviders) {
-				const trimmed = line.trim();
-				if (trimmed && !trimmed.startsWith('rule-providers:') && !trimmed.includes(':') === false) {
-					const match = trimmed.match(/^([a-zA-Z0-9_-]+):/);
-					if (match) {
-						providerNames.push(match[1]);
+		// 添加已有的 RULE-SET 引用
+		for (const rule of ruleSetReferences) {
+			newLines.push(`  - ${rule}`);
+		}
+		
+		// 如果没有已存在的 RULE-SET 引用，添加基于 providers 的引用
+		if (ruleSetReferences.length === 0 && existingProviders.size > 0) {
+			// 按优先级顺序添加 RULE-SET
+			const providerOrder = ['reject', 'ad-block', 'ads', 'private', 'direct', 'apple', 'google', 'proxy'];
+			const addedProviders = new Set();
+			
+			for (const preferredName of providerOrder) {
+				for (const [name, _] of existingProviders) {
+					if (name.toLowerCase().includes(preferredName) && !addedProviders.has(name)) {
+						let policy = '🚀 节点选择';
+						if (name.toLowerCase().includes('reject') || name.toLowerCase().includes('ad')) {
+							policy = 'REJECT';
+						} else if (name.toLowerCase().includes('direct') || name.toLowerCase().includes('cn') || 
+						           name.toLowerCase().includes('china') || name.toLowerCase().includes('private')) {
+							policy = 'DIRECT';
+						}
+						newLines.push(`  - RULE-SET,${name},${policy}`);
+						addedProviders.add(name);
 					}
 				}
 			}
 			
-			// 构建新的配置
-			let newContent = beforeRuleProviders.join('\n') + '\n';
-			newContent += ruleProviders.join('\n') + '\n';
-			newContent += '\nrules:\n';
-			
-			// 添加保留的简单规则
-			for (const rule of simpleRules) {
-				if (rule.startsWith('RULE-SET,')) {
-					// 已经是 RULE-SET，直接保留
-					newContent += `  - ${rule}\n`;
-				} else if (rule.startsWith('DOMAIN-SUFFIX,') || rule.startsWith('DOMAIN,')) {
-					// 简单域名规则保留在最前面
-					newContent += `  - ${rule}\n`;
+			// 添加剩余的 providers
+			for (const [name, _] of existingProviders) {
+				if (!addedProviders.has(name)) {
+					newLines.push(`  - RULE-SET,${name},🚀 节点选择`);
 				}
 			}
-			
-			// 添加 RULE-SET 引用（如果规则中还没有）
-			const existingRuleSets = simpleRules.filter(r => r.startsWith('RULE-SET,')).map(r => {
-				const parts = r.split(',');
-				return parts[1];
-			});
-			
-			for (const providerName of providerNames) {
-				if (!existingRuleSets.includes(providerName)) {
-					// 根据 provider 名称推断策略
-					let policy = '🚀 节点选择';
-					if (providerName.includes('reject') || providerName.includes('ad')) {
-						policy = 'REJECT';
-					} else if (providerName.includes('direct') || providerName.includes('cn') || 
-					           providerName.includes('china') || providerName.includes('private')) {
-						policy = 'DIRECT';
-					}
-					newContent += `  - RULE-SET,${providerName},${policy}\n`;
-				}
-			}
-			
-			// 添加已有的 RULE-SET 规则
-			for (const rule of simpleRules) {
-				if (rule.startsWith('RULE-SET,')) {
-					newContent += `  - ${rule}\n`;
-				}
-			}
-			
-			// 最后添加 GEOIP 和 FINAL 规则
-			for (const rule of simpleRules) {
-				if (rule.startsWith('GEOIP,') || rule.includes('FINAL') || rule.includes('MATCH')) {
-					newContent += `  - ${rule}\n`;
-				}
-			}
-			
-			newContent += afterRules.join('\n');
-			
-			return newContent;
+		} else if (ruleSetReferences.length === 0) {
+			// 使用默认的 RULE-SET
+			newLines.push(`  - RULE-SET,reject,REJECT`);
+			newLines.push(`  - RULE-SET,direct,DIRECT`);
+			newLines.push(`  - RULE-SET,proxy,🚀 节点选择`);
 		}
 		
-		// 如果没有 rule-providers 或规则较少，返回原内容
-		return content;
+		// 添加 GEOIP 和 FINAL 规则
+		for (const rule of simpleRules) {
+			if (rule.startsWith('GEOIP,') || rule.includes('FINAL') || rule.includes('MATCH')) {
+				newLines.push(`  - ${rule}`);
+			}
+		}
+		
+		// 4. 添加 rules 之后的内容(如果有)
+		if (rulesEnd < lines.length) {
+			for (let i = rulesEnd; i < lines.length; i++) {
+				newLines.push(lines[i]);
+			}
+		}
+		
+		const result = newLines.join('\n');
+		console.log('转换完成');
+		return result;
 		
 	} catch (error) {
 		console.error('转换 rule-providers 失败:', error);
-		return content; // 出错时返回原内容
+		return content;
 	}
 }
 
