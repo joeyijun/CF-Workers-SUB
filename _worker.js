@@ -808,22 +808,25 @@ function fixProxyGroups(content) {
 	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
 	const lines = content.split(lineBreak);
 
-	// 第1步：从 proxies: 段提取所有代理名称
+	// 第1步：只扫顶级 proxies: 段，提取节点名
 	const allProxyNames = [];
-	let inProxiesSection = false;
+	// 顶级段名集合（行首无缩进的 key:）
+	const TOP_LEVEL_KEYS = /^[a-zA-Z][a-zA-Z0-9_-]*:/;
+	let section = ''; // 当前顶级段
 	for (let i = 0; i < lines.length; i++) {
-		const trimmed = lines[i].trim();
-		if (trimmed === 'proxies:') { inProxiesSection = true; continue; }
-		if (inProxiesSection && trimmed !== '' && !trimmed.startsWith('-') && !trimmed.startsWith('#')) {
-			inProxiesSection = false; continue;
+		const line = lines[i];
+		// 检测顶级字段切换（行首无空白）
+		if (TOP_LEVEL_KEYS.test(line)) {
+			section = line.split(':')[0].trim();
+			continue;
 		}
-		if (inProxiesSection) {
-			const nameMatch = lines[i].match(/name:\s*"?([^",}\r\n]+)"?\s*[,}]/);
+		if (section === 'proxies') {
+			const nameMatch = line.match(/name:\s*"?([^",}\r\n]+)"?\s*[,}]/);
 			if (nameMatch) allProxyNames.push(nameMatch[1].trim());
 		}
 	}
 
-	// 第2步：按 emoji 国旗分组代理名称
+	// 第2步：按 emoji 国旗分组
 	const flagToProxies = {};
 	for (const name of allProxyNames) {
 		const match = name.match(/^([\u{1F1E6}-\u{1F1FF}]{2})\s/u);
@@ -835,36 +838,54 @@ function fixProxyGroups(content) {
 	}
 	if (Object.keys(flagToProxies).length === 0) return content;
 
-	// 第3步：遍历配置行，找到国家代理组并替换其 proxies 列表
+	// 第3步：逐行处理，仅在 proxy-groups 段内、且当前组是国家组时替换其 proxies 列表
 	const result = [];
-	let currentGroupFlag = null;
-	let inGroupProxiesList = false;
-	let proxiesIndent = '';
+	let topSection = ''; // 当前顶级段
+	let currentGroupFlag = null; // 当前 proxy-group 对应的国旗，null 表示非国家组
+	let inGroupProxiesList = false; // 是否在该 group 的 proxies 子列表内
+	let proxiesIndent = ''; // proxies: 行的缩进
 	let addedNewProxies = false;
 
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
 		const trimmed = line.trim();
 
-		// 检测新的 proxy-group 开始
-		if (trimmed.startsWith('- name:') || trimmed.startsWith('- {name:')) {
+		// 检测顶级段切换
+		if (TOP_LEVEL_KEYS.test(line)) {
+			topSection = line.split(':')[0].trim();
+			currentGroupFlag = null;
+			inGroupProxiesList = false;
+			addedNewProxies = false;
+			result.push(line);
+			continue;
+		}
+
+		if (topSection !== 'proxy-groups') {
+			result.push(line);
+			continue;
+		}
+
+		// === 在 proxy-groups 段内 ===
+
+		// 检测新 group 开始（以 "  - name:" 开头）
+		if (/^\s+- name:/.test(line) || /^\s+- \{name:/.test(line)) {
 			inGroupProxiesList = false;
 			addedNewProxies = false;
 			currentGroupFlag = null;
-
-			// 检查是否是国家组（名称以国旗 emoji 开头）
-			const flagMatch = trimmed.match(/name:\s*"?([\u{1F1E6}-\u{1F1FF}]{2})\s/u);
+			const flagMatch = line.match(/name:\s*"?([\u{1F1E6}-\u{1F1FF}]{2})\s/u);
 			if (flagMatch && flagToProxies[flagMatch[1]]) {
 				currentGroupFlag = flagMatch[1];
 			}
+			result.push(line);
+			continue;
 		}
 
-		// 检测国家组内的 proxies: 子段
-		if (currentGroupFlag && trimmed === 'proxies:') {
+		// 检测国家组内的 proxies: 子段（有缩进）
+		if (currentGroupFlag && trimmed === 'proxies:' && line !== 'proxies:' && line !== 'proxies:\r') {
 			inGroupProxiesList = true;
 			proxiesIndent = line.match(/^(\s*)/)[1];
 			result.push(line);
-			// 添加所有匹配国旗的代理
+			// 追加新的代理列表
 			for (const proxyName of flagToProxies[currentGroupFlag]) {
 				result.push(`${proxiesIndent}  - ${proxyName}`);
 			}
@@ -872,17 +893,26 @@ function fixProxyGroups(content) {
 			continue;
 		}
 
-		// 跳过被替换的国家组的旧代理列表项
+		// 跳过国家组的旧代理列表行
 		if (inGroupProxiesList && addedNewProxies) {
 			const lineIndent = line.match(/^(\s*)/)[1].length;
 			const expectedIndent = proxiesIndent.length + 2;
 			if (lineIndent >= expectedIndent && trimmed.startsWith('-')) {
-				// 这是旧的代理列表项，跳过
-				continue;
+				continue; // 旧列表项，跳过
 			} else {
-				// 代理列表结束
+				// 列表结束
 				inGroupProxiesList = false;
-				currentGroupFlag = null;
+				addedNewProxies = false;
+				// 如果是新的 group 起始行，重新处理
+				if (/^\s+- name:/.test(line) || /^\s+- \{name:/.test(line)) {
+					currentGroupFlag = null;
+					const flagMatch = line.match(/name:\s*"?([\u{1F1E6}-\u{1F1FF}]{2})\s/u);
+					if (flagMatch && flagToProxies[flagMatch[1]]) {
+						currentGroupFlag = flagMatch[1];
+					}
+				}
+				result.push(line);
+				continue;
 			}
 		}
 
@@ -891,7 +921,6 @@ function fixProxyGroups(content) {
 
 	return result.join(lineBreak);
 }
-
 async function proxyURL(proxyURL, url) {
 	const URLs = await ADD(proxyURL);
 	const fullURL = URLs[Math.floor(Math.random() * URLs.length)];
