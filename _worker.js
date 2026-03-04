@@ -207,32 +207,41 @@ export default {
 				if (!subConverterResponse.ok) return new Response(base64Data, { headers: responseHeaders });
 				let subConverterContent = await subConverterResponse.text();
 				if (订阅格式 == 'clash') {
-					subConverterContent = await clashFix(subConverterContent);
-					// 恢复被 subconverter 去掉的 emoji 国旗
-					try {
-						subConverterContent = restoreEmoji(subConverterContent, result);
-						// 根据恢复的 emoji 重新分配节点到对应国家组
-						subConverterContent = fixAdvancedFeatures(subConverterContent, result);
-						subConverterContent = fixProxyGroups(subConverterContent);
-					} catch (e) {
-						console.log('emoji/分组恢复失败: ' + e.message);
-					}
-					// 将 inline rules 转换为 rule-providers 格式
-					try {
-						const rulesets = await parseSubConfig(subConfig);
-						if (rulesets && rulesets.length > 0) {
-							subConverterContent = convertRulesToProviders(subConverterContent, rulesets);
-						}
-					} catch (e) {
-						console.log('rule-providers 转换失败，使用原始 rules: ' + e.message);
-					}
-				}
-				// 只有非浏览器订阅才会返回SUBNAME
-				if (!userAgent.includes('mozilla')) responseHeaders["Content-Disposition"] = `attachment; filename*=utf-8''${encodeURIComponent(FileName)}`;
-				return new Response(subConverterContent, { headers: responseHeaders });
-			} catch (error) {
-				return new Response(base64Data, { headers: responseHeaders });
-			}
+                subConverterUrl = `${subProtocol}://${subConverter}/sub?target=clash&url=${encodeURIComponent(订阅转换URL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=false&list=false&tfo=false&scv=true&fdn=false&sort=false&new_name=true&rule-providers=true`;
+                
+                try {
+                    const subConverterResponse = await fetch(subConverterUrl, { headers: { 'User-Agent': userAgentHeader } });
+                    if (!subConverterResponse.ok) return new Response(base64Data, { headers: responseHeaders });
+                    
+                    let content = await subConverterResponse.text();
+
+                    // --- 强力修复逻辑：直接进行全局字符串替换 ---
+                    // 1. 修复 xhttp (解决 wanxy 节点)
+                    // 将被误转的 network: h2 换回 network: xhttp，并修正 opts
+                    content = content.replace(/network: h2, h2-opts: {path: ([^,}]*), host: \[([^\]]*)\]}/g, 'network: xhttp, xhttp-opts: {path: $1, host: $2}');
+                    
+                    // 2. 修复 gRPC 的斜杠问题 (解决 wanxy 2)
+                    content = content.replace(/grpc-service-name: \//g, 'grpc-service-name: ""');
+                    
+                    // 3. 补全 Reality (针对 Trojan 等可能丢失的情况，这一步通过 subconverter 的 &scv=true 通常能保留，如果还丢，建议检查原始链接)
+
+                    // 4. 这里的内置修复函数也要执行
+                    content = await clashFix(content);
+                    
+                    try {
+                        content = restoreEmoji(content, result);
+                        content = fixProxyGroups(content);
+                    } catch (e) {
+                        console.log('Emoji/分组恢复失败');
+                    }
+
+                    if (!userAgent.includes('mozilla')) responseHeaders["Content-Disposition"] = `attachment; filename*=utf-8''${encodeURIComponent(FileName)}`;
+                    return new Response(content, { headers: responseHeaders });
+
+                } catch (error) {
+                    return new Response(base64Data, { headers: responseHeaders });
+                }
+            }
 		}
 	}
 };
@@ -1204,5 +1213,6 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 		});
 	}
 }
+
 
 
