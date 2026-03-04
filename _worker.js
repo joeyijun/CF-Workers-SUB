@@ -210,6 +210,8 @@ export default {
 					// 恢复被 subconverter 去掉的 emoji 国旗
 					try {
 						subConverterContent = restoreEmoji(subConverterContent, result);
+						// emoji 恢复后再清幽灵引用（此时节点名已含 emoji，匹配才准确）
+						subConverterContent = removeGhostProxyRefs(subConverterContent);
 						// 根据恢复的 emoji 重新分配节点到对应国家组
 						subConverterContent = fixProxyGroups(subConverterContent);
 					} catch (e) {
@@ -329,6 +331,214 @@ async function MD5MD5(text) {
 // Bug1: 每个 group 末尾多一个空的 proxies: 行
 // Bug2: 部分 group 的节点列表游离在外（没有 proxies: 标头）
 // 修复：收集每个 group 的所有节点项（无论游离还是在 proxies: 下），重建为标准结构
+async function parseSubConfig(configUrl) {
+	try {
+		const response = await fetch(configUrl);
+		if (!response.ok) return [];
+		const text = await response.text();
+		const lines = text.split(/\r?\n/);
+		const rulesets = [];
+		for (const line of lines) {
+			const trimmed = line.trim();
+			if (trimmed.startsWith(';') || trimmed === '') continue;
+			if (trimmed.startsWith('ruleset=')) {
+				const value = trimmed.substring('ruleset='.length);
+				const commaIndex = value.indexOf(',');
+				if (commaIndex === -1) continue;
+				const group = value.substring(0, commaIndex).trim();
+				const target = value.substring(commaIndex + 1).trim();
+				if (target.startsWith('[]')) {
+					// 内置规则如 []GEOIP,CN,no-resolve 或 []FINAL，保留为 inline rule
+					rulesets.push({ group, type: 'inline', rule: target.substring(2) });
+				} else if (target.startsWith('http')) {
+					// 远程规则集 URL
+					rulesets.push({ group, type: 'url', url: target, behavior: 'classical' });
+				} else if (target.startsWith('clash-domain:')) {
+					// clash-domain: 前缀，behavior 为 domain
+					rulesets.push({ group, type: 'url', url: target.substring('clash-domain:'.length), behavior: 'domain' });
+				} else if (target.startsWith('clash-ipcidr:')) {
+					// clash-ipcidr: 前缀，behavior 为 ipcidr
+					rulesets.push({ group, type: 'url', url: target.substring('clash-ipcidr:'.length), behavior: 'ipcidr' });
+				} else if (target.startsWith('clash-classical:')) {
+					// clash-classical: 前缀，behavior 为 classical
+					rulesets.push({ group, type: 'url', url: target.substring('clash-classical:'.length), behavior: 'classical' });
+				}
+			}
+		}
+		return rulesets;
+	} catch (e) {
+		console.log('解析 subConfig 失败: ' + e.message);
+		return [];
+	}
+}
+
+// 将 Clash 配置中的 inline rules 替换为 rule-providers 格式
+// 根据 rulesets 生成标准的 rule-providers + rules YAML 块
+// 当 subconverter 没有生成 rules 段时使用
+function buildDefaultRules(rulesets, lineBreak) {
+	// 如果 rulesets 为空，使用内置的 ACL4SSR 规则集
+	const defaultRulesets = rulesets && rulesets.length > 0 ? rulesets : [
+		{ group: 'DIRECT', type: 'url', url: 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/LocalAreaNetwork.list', behavior: 'classical' },
+		{ group: 'DIRECT', type: 'url', url: 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/UnBan.list', behavior: 'classical' },
+		{ group: '🚀 节点选择', type: 'url', url: 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/GoogleFCM.list', behavior: 'classical' },
+		{ group: 'DIRECT', type: 'url', url: 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/GoogleCN.list', behavior: 'classical' },
+		{ group: '🚀 节点选择', type: 'url', url: 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/Telegram.list', behavior: 'classical' },
+		{ group: '🚀 节点选择', type: 'url', url: 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/ProxyMedia.list', behavior: 'classical' },
+		{ group: '🚀 节点选择', type: 'url', url: 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/ProxyLite.list', behavior: 'classical' },
+		{ group: 'DIRECT', type: 'url', url: 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/ChinaDomain.list', behavior: 'classical' },
+		{ group: 'DIRECT', type: 'url', url: 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/ChinaCompanyIp.list', behavior: 'classical' },
+		{ group: 'DIRECT', type: 'inline', rule: 'GEOIP,CN,no-resolve' },
+		{ group: '🚀 节点选择', type: 'inline', rule: 'FINAL' },
+	];
+
+	const ruleProviders = {};
+	const newRules = [];
+	let providerIndex = 0;
+
+	for (const ruleset of defaultRulesets) {
+		if (ruleset.type === 'inline') {
+			if (ruleset.rule === 'FINAL') {
+				newRules.push('  - MATCH,' + ruleset.group);
+			} else if (ruleset.rule.endsWith(',no-resolve')) {
+				const ruleBase = ruleset.rule.slice(0, -',no-resolve'.length);
+				newRules.push('  - ' + ruleBase + ',' + ruleset.group + ',no-resolve');
+			} else {
+				newRules.push('  - ' + ruleset.rule + ',' + ruleset.group);
+			}
+		} else if (ruleset.type === 'url') {
+			let providerName = ruleset.url.split('/').pop().replace(/\.list$|\.yaml$|\.txt$/i, '').toLowerCase();
+			if (ruleProviders[providerName]) {
+				providerName = providerName + '_' + providerIndex;
+			}
+			providerIndex++;
+			ruleProviders[providerName] = {
+				type: 'http',
+				behavior: ruleset.behavior || 'classical',
+				url: ruleset.url,
+				path: './ruleset/' + providerName + '.yaml',
+				interval: 86400,
+			};
+			newRules.push('  - RULE-SET,' + providerName + ',' + ruleset.group);
+		}
+	}
+
+	let rpText = 'rule-providers:' + lineBreak;
+	for (const [name, p] of Object.entries(ruleProviders)) {
+		rpText += '  ' + name + ':' + lineBreak;
+		rpText += '    type: ' + p.type + lineBreak;
+		rpText += '    behavior: ' + p.behavior + lineBreak;
+		rpText += '    url: "' + p.url + '"' + lineBreak;
+		rpText += '    path: ' + p.path + lineBreak;
+		rpText += '    interval: ' + p.interval + lineBreak;
+	}
+
+	let rulesText = 'rules:' + lineBreak;
+	for (const rule of newRules) {
+		rulesText += rule + lineBreak;
+	}
+
+	return rpText + lineBreak + rulesText;
+}
+
+function convertRulesToProviders(content, rulesets) {
+	// 检查是否已经有 rule-providers（避免重复转换）
+	if (content.includes('rule-providers:')) return content;
+
+	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
+
+	// 如果 subconverter 没有生成 rules 段，追加一套默认 rule-providers + rules
+	if (!content.includes('\nrules:')) {
+		return content + lineBreak + buildDefaultRules(rulesets, lineBreak);
+	}
+	const lines = content.split(lineBreak);
+
+	// 找到 rules: 段的位置
+	let rulesStartIndex = -1;
+	let rulesEndIndex = -1;
+	for (let i = 0; i < lines.length; i++) {
+		if (lines[i].trim() === 'rules:') {
+			rulesStartIndex = i;
+			continue;
+		}
+		if (rulesStartIndex !== -1 && rulesEndIndex === -1) {
+			// rules 段中的行以 "  -" 开头
+			if (!lines[i].trim().startsWith('-') && lines[i].trim() !== '') {
+				rulesEndIndex = i;
+			}
+		}
+	}
+	if (rulesStartIndex === -1) return content;
+	if (rulesEndIndex === -1) rulesEndIndex = lines.length;
+
+	// 生成 rule-providers 和新的 rules
+	const ruleProviders = {};
+	const newRules = [];
+	let providerIndex = 0;
+
+	for (const ruleset of rulesets) {
+		if (ruleset.type === 'inline') {
+			// GEOIP,CN / GEOIP,CN,no-resolve / FINAL 等内置规则
+			const rule = ruleset.rule;
+			if (rule === 'FINAL') {
+				newRules.push(`  - MATCH,${ruleset.group}`);
+			} else if (rule.endsWith(',no-resolve')) {
+				// GEOIP,CN,no-resolve -> GEOIP,CN,GROUP,no-resolve
+				const ruleBase = rule.slice(0, -',no-resolve'.length);
+				newRules.push(`  - ${ruleBase},${ruleset.group},no-resolve`);
+			} else {
+				newRules.push(`  - ${rule},${ruleset.group}`);
+			}
+		} else if (ruleset.type === 'url') {
+			// 远程规则集 -> rule-provider
+			const url = ruleset.url;
+			// 从 URL 提取 provider 名称
+			let providerName = url.split('/').pop().replace(/\.list$|\.yaml$|\.txt$/i, '').toLowerCase();
+			// 确保名称唯一
+			if (ruleProviders[providerName]) {
+				providerName = providerName + '_' + providerIndex;
+			}
+			providerIndex++;
+
+			// 根据 URL 中的文件扩展名和路径判断 behavior
+			let behavior = ruleset.behavior || 'classical';  // 使用 INI 指定的 behavior，默认 classical
+
+			ruleProviders[providerName] = {
+				type: 'http',
+				behavior: behavior,
+				url: url,
+				path: `./ruleset/${providerName}.yaml`,
+				interval: 86400
+			};
+
+			newRules.push(`  - RULE-SET,${providerName},${ruleset.group}`);
+		}
+	}
+
+	// 构建 rule-providers YAML 文本
+	let rpText = 'rule-providers:' + lineBreak;
+	for (const [name, provider] of Object.entries(ruleProviders)) {
+		rpText += `  ${name}:` + lineBreak;
+		rpText += `    type: ${provider.type}` + lineBreak;
+		rpText += `    behavior: ${provider.behavior}` + lineBreak;
+		rpText += `    url: "${provider.url}"` + lineBreak;
+		rpText += `    path: ${provider.path}` + lineBreak;
+		rpText += `    interval: ${provider.interval}` + lineBreak;
+	}
+
+	// 构建新的 rules 段
+	let rulesText = 'rules:' + lineBreak;
+	for (const rule of newRules) {
+		rulesText += rule + lineBreak;
+	}
+
+	// 替换原始内容
+	const beforeRules = lines.slice(0, rulesStartIndex).join(lineBreak);
+	const afterRules = lines.slice(rulesEndIndex).join(lineBreak);
+
+	return beforeRules + lineBreak + rpText + lineBreak + rulesText + afterRules;
+}
+
+// 从原始节点链接中提取 emoji 映射：baseName -> emoji
 function extractEmojiMap(nodeText) {
 	const emojiMap = {};
 	const lines = nodeText.split('\n');
@@ -707,15 +917,7 @@ function clashFix(content) {
 	// subconverter 存在 bug：proxy-groups 中每个组末尾多一个空的 proxies:，
 	// 且部分组的节点列表游离在 proxies: 标头之外，导致 yaml 结构混乱无法使用。
 	content = fixSubconverterGroupStructure(content);
-	
-	// ===== 修复1：移除 xhttp 传输协议的节点（Clash/Mihomo 不支持 xhttp）=====
-	// xhttp 是 Xray 专有协议，subconverter 会将其错误转换为 h2，导致连接失败
-	// 必须在 removeGhostProxyRefs 之前运行！！！
-	content = removeXhttpProxies(content);
-
-	// ===== 修复2：清理 proxy-groups 中引用了不存在节点的条目 =====
-	// 现在执行时，xhttp 节点已经被彻底删除了，所以会正确清理掉对应的组内引用
-	content = removeGhostProxyRefs(content);
+	// ===== 修复：清理 proxy-groups 中引用了不存在节点的条目 =====
 
 	if (content.includes('wireguard') && !content.includes('remote-dns-resolve')) {
 		let lines;
@@ -739,11 +941,16 @@ function clashFix(content) {
 		content = result;
 	}
 
-	// ===== 修复3：gRPC service-name 为空时被错误写成 "/" 的问题 =====
+	// ===== 修复1：移除 xhttp 传输协议的节点（Clash/Mihomo 不支持 xhttp）=====
+	// xhttp 是 Xray 专有协议，subconverter 会将其错误转换为 h2，导致连接失败
+	// 此类节点请使用 v2rayN / NekoBox 等 Xray 内核客户端
+	content = removeXhttpProxies(content);
+
+	// ===== 修复2：gRPC service-name 为空时被错误写成 "/" 的问题 =====
 	// 原始节点 serviceName= 为空，转换后应为 "" 而非 "/"
 	content = content.replace(/grpc-service-name:\s*["']?\/["']?(\s*[,}])/g, 'grpc-service-name: ""$1');
 
-	// ===== 修复4：Trojan/VLESS + gRPC + REALITY 节点 reality-opts 丢失问题 =====
+	// ===== 修复3：Trojan/VLESS + gRPC + REALITY 节点 reality-opts 丢失问题 =====
 	// subconverter 在转换 Trojan+gRPC+REALITY 时可能丢失 reality-opts，
 	// 导致节点变成普通 TLS 而连接失败。此问题需从原始节点链接重新注入。
 	// （已在 injectRealityOpts 中处理，见下方函数）
@@ -1410,4 +1617,3 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 		});
 	}
 }
-
