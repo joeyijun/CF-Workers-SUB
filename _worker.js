@@ -518,12 +518,15 @@ function fixProxyGroups(content) {
 // 清理 proxy-groups 中引用了不存在的节点名的条目
 // 例如 subconverter 有时会在 proxy-groups 里留下原始名（wanxy），
 // 但 proxies 段里实际只有带编号的版本（wanxy 2、wanxy 3）
+// 清理 proxy-groups 中引用了不存在节点名的条目
+// 正确逻辑：保留 realNames（真实节点）、groupNames（proxy-group 名）、内置关键字（DIRECT/REJECT）
+// 绝不用 emoji 判断——带国旗的引用也可能是幽灵（如 🇯🇵 wanxy 并不存在）
 function removeGhostProxyRefs(content) {
 	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
 	const lines = content.split(lineBreak);
 	const TOP = /^[a-zA-Z][a-zA-Z0-9_-]*:/;
 
-	// 第1步：收集 proxies 段中所有真实节点名
+	// 第1步：收集 proxies 段所有真实节点名
 	const realNames = new Set();
 	let section = '';
 	for (const line of lines) {
@@ -533,19 +536,29 @@ function removeGhostProxyRefs(content) {
 			if (m) realNames.add(m[1].trim());
 		}
 	}
-	if (realNames.size === 0) return content;
 
-	// 保留这些特殊关键字（不是节点名，而是 group 引用或内置策略）
-	const KEEP_KEYWORDS = new Set(['DIRECT', 'REJECT', 'GLOBAL']);
+	// 第2步：收集 proxy-groups 段所有 group 名
+	const groupNames = new Set();
+	section = '';
+	for (const line of lines) {
+		if (TOP.test(line)) { section = line.split(':')[0].trim(); continue; }
+		if (section === 'proxy-groups') {
+			// 匹配 "  - name: xxx" 或 "  - {name: xxx,"
+			const m = line.match(/^\s+- (?:name:|{name:)\s*"?([^",}\r\n]+)"?/);
+			if (m) groupNames.add(m[1].trim());
+		}
+	}
 
-	// 第2步：在 proxy-groups 段，过滤掉引用了不存在节点的列表项
+	// 内置关键字
+	const BUILTINS = new Set(['DIRECT', 'REJECT', 'GLOBAL', 'PASS']);
+
+	// 第3步：过滤 proxy-groups 中的幽灵引用
 	const result = [];
 	let topSection = '';
 	let inGroupProxies = false;
 	let proxiesIndent = '';
 
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i];
+	for (const line of lines) {
 		const trimmed = line.trim();
 
 		if (TOP.test(line)) {
@@ -560,14 +573,14 @@ function removeGhostProxyRefs(content) {
 			continue;
 		}
 
-		// 新 group 开始，重置状态
+		// 新 group 开始，重置
 		if (/^\s+- name:/.test(line) || /^\s+- \{name:/.test(line)) {
 			inGroupProxies = false;
 			result.push(line);
 			continue;
 		}
 
-		// 检测 proxies: 子段
+		// proxies: 子段
 		if (trimmed === 'proxies:' && line !== 'proxies:' && line !== 'proxies:\r') {
 			inGroupProxies = true;
 			proxiesIndent = line.match(/^(\s*)/)[1];
@@ -575,19 +588,15 @@ function removeGhostProxyRefs(content) {
 			continue;
 		}
 
-		// 在 proxies 子列表中：过滤幽灵引用
+		// 在 proxies 子列表中过滤幽灵引用
 		if (inGroupProxies && trimmed.startsWith('- ')) {
 			const lineIndent = line.match(/^(\s*)/)[1].length;
 			if (lineIndent > proxiesIndent.length) {
 				const refName = trimmed.substring(2).trim();
-				// 保留：是真实节点名、是 group 名（含 emoji 等特殊字符）、是内置关键字
-				const isRealNode = realNames.has(refName);
-				const isKeyword = KEEP_KEYWORDS.has(refName);
-				// 含 emoji 或特殊字符的 group 引用（如 ♻️ 自动选择）保留
-				const isGroupRef = /[\u{1F300}-\u{1F9FF}♻️⚖️🚀Ⓜ️]/u.test(refName) || refName.startsWith('🇺') || refName.startsWith('🇸') || refName.startsWith('🇯') || refName.startsWith('🇭');
-				if (!isRealNode && !isKeyword && !isGroupRef) {
-					console.log(`[removeGhostProxyRefs] 已移除幽灵引用: "${refName}"`);
-					continue; // 跳过这个幽灵条目
+				const keep = realNames.has(refName) || groupNames.has(refName) || BUILTINS.has(refName);
+				if (!keep) {
+					console.log(`[removeGhostProxyRefs] 移除幽灵引用: "${refName}"`);
+					continue;
 				}
 				result.push(line);
 				continue;
@@ -596,10 +605,7 @@ function removeGhostProxyRefs(content) {
 			}
 		}
 
-		if (inGroupProxies && !trimmed.startsWith('-')) {
-			inGroupProxies = false;
-		}
-
+		if (inGroupProxies && !trimmed.startsWith('-')) inGroupProxies = false;
 		result.push(line);
 	}
 
