@@ -325,7 +325,106 @@ async function MD5MD5(text) {
 	return secondHex.toLowerCase();
 }
 
+// 修复 subconverter 输出的 proxy-groups 结构错误：
+// Bug1: 每个 group 末尾多一个空的 proxies: 行
+// Bug2: 部分 group 的节点列表游离在外（没有 proxies: 标头）
+// 修复：收集每个 group 的所有节点项（无论游离还是在 proxies: 下），重建为标准结构
+function fixSubconverterGroupStructure(content) {
+	const lb = content.includes('\r\n') ? '\r\n' : '\n';
+	const lines = content.split(lb);
+	const TOP = /^[a-zA-Z][a-zA-Z0-9_-]*:/;
+	const result = [];
+	let topSection = '';
+	let i = 0;
+
+	while (i < lines.length) {
+		const line = lines[i];
+
+		if (TOP.test(line)) {
+			topSection = line.split(':')[0].trim();
+			result.push(line);
+			i++; continue;
+		}
+
+		if (topSection !== 'proxy-groups') {
+			result.push(line);
+			i++; continue;
+		}
+
+		// proxy-groups 段内：收集整个 group 块并修复
+		if (/^\s+- name:/.test(line) || /^\s+- \{name:/.test(line)) {
+			const groupLines = [line];
+			i++;
+			while (i < lines.length) {
+				const nl = lines[i];
+				if (nl.trim() !== '' && (/^\s+- name:/.test(nl) || /^\s+- \{name:/.test(nl) || TOP.test(nl))) break;
+				groupLines.push(nl);
+				i++;
+			}
+			result.push(...fixGroupBlock(groupLines));
+			continue;
+		}
+
+		result.push(line);
+		i++;
+	}
+
+	return result.join(lb);
+}
+
+function fixGroupBlock(lines) {
+	if (!lines.length) return lines;
+	const groupIndent = (lines[0].match(/^(\s+)/) || ['',''])[1];
+	const propIndent = groupIndent + '  ';
+	const itemIndent = groupIndent + '    ';
+
+	const allItems = [];
+	const attrLines = [lines[0]];
+
+	let j = 1;
+	while (j < lines.length) {
+		const line = lines[j];
+		const trimmed = line.trim();
+		if (trimmed === '') { j++; continue; }
+
+		// 有缩进的 proxies: 行
+		if (line === propIndent + 'proxies:' || line === propIndent + 'proxies:\r') {
+			j++;
+			// 收集其下的列表项
+			while (j < lines.length && lines[j].startsWith(itemIndent + '- ')) {
+				allItems.push(lines[j].trim().substring(2));
+				j++;
+			}
+			continue;
+		}
+
+		// 游离列表项
+		if (line.startsWith(itemIndent + '- ')) {
+			allItems.push(line.trim().substring(2));
+			j++; continue;
+		}
+
+		// 属性行
+		attrLines.push(line);
+		j++;
+	}
+
+	const result = [...attrLines];
+	if (allItems.length > 0) {
+		result.push(propIndent + 'proxies:');
+		for (const item of allItems) {
+			result.push(itemIndent + '- ' + item);
+		}
+	}
+	return result;
+}
+
 function clashFix(content) {
+	// ===== 最优先：修复 subconverter 输出的 proxy-groups 结构错误 =====
+	// subconverter 存在 bug：proxy-groups 中每个组末尾多一个空的 proxies:，
+	// 且部分组的节点列表游离在 proxies: 标头之外，导致 yaml 结构混乱无法使用。
+	content = fixSubconverterGroupStructure(content);
+
 	if (content.includes('wireguard') && !content.includes('remote-dns-resolve')) {
 		let lines;
 		if (content.includes('\r\n')) {
@@ -503,78 +602,18 @@ function injectRealityOpts(clashContent, rawNodeText) {
 //   1. network: h2（或 network: h2,）
 //   2. 带有 reality-opts
 //   3. h2-opts 中存在 path 字段（xhttp 有 path，纯 h2 极少带 path+reality 组合）
+// 从顶级 proxies: 段中移除 xhttp 误转节点（network: h2 + reality-opts + h2-opts path 同时存在）
+// 只处理顶级 proxies: 段，不碰 proxy-groups
 function removeXhttpProxies(content) {
 	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
 	const lines = content.split(lineBreak);
-
-	let inProxiesSection = false;
-	let skipBlock = false;
+	const TOP = /^[a-zA-Z][a-zA-Z0-9_-]*:/;
+	const result = [];
+	let topSection = '';
 	let blockLines = [];
-	let result = [];
 
-	for (let i = 0; i < lines.length; i++) {
-		const trimmed = lines[i].trim();
-
-		if (trimmed === 'proxies:') {
-			inProxiesSection = true;
-			result.push(lines[i]);
-			continue;
-		}
-
-		if (inProxiesSection) {
-			// 检测新节点开始（以 "  - {name:" 或 "  - name:" 开头）
-			if (trimmed.startsWith('- {name:') || trimmed.startsWith('- name:')) {
-				// 处理上一个 block
-				if (blockLines.length > 0) {
-					const blockStr = blockLines.join(lineBreak);
-					// 判断是否是 xhttp 误转：network: h2 + reality-opts + h2-opts path
-					const isXhttp = /network:\s*h2/.test(blockStr)
-						&& /reality-opts/.test(blockStr)
-						&& /h2-opts/.test(blockStr)
-						&& /path:/.test(blockStr);
-					if (!isXhttp) {
-						result.push(...blockLines);
-					} else {
-						console.log('[clashFix] 已移除 xhttp 误转节点（network: h2 + reality-opts + h2-opts path）');
-					}
-				}
-				blockLines = [lines[i]];
-				continue;
-			}
-
-			// 段结束判断（非缩进内容且非空行）
-			if (trimmed !== '' && !trimmed.startsWith('-') && !trimmed.startsWith('#') && !lines[i].startsWith('  ') && !lines[i].startsWith('\t')) {
-				// 处理最后一个 block
-				if (blockLines.length > 0) {
-					const blockStr = blockLines.join(lineBreak);
-					const isXhttp = /network:\s*h2/.test(blockStr)
-						&& /reality-opts/.test(blockStr)
-						&& /h2-opts/.test(blockStr)
-						&& /path:/.test(blockStr);
-					if (!isXhttp) {
-						result.push(...blockLines);
-					} else {
-						console.log('[clashFix] 已移除 xhttp 误转节点（network: h2 + reality-opts + h2-opts path）');
-					}
-					blockLines = [];
-				}
-				inProxiesSection = false;
-				result.push(lines[i]);
-				continue;
-			}
-
-			if (blockLines.length > 0) {
-				blockLines.push(lines[i]);
-			} else {
-				result.push(lines[i]);
-			}
-		} else {
-			result.push(lines[i]);
-		}
-	}
-
-	// 处理文件末尾残留 block
-	if (blockLines.length > 0) {
+	const flushBlock = () => {
+		if (!blockLines.length) return;
 		const blockStr = blockLines.join(lineBreak);
 		const isXhttp = /network:\s*h2/.test(blockStr)
 			&& /reality-opts/.test(blockStr)
@@ -583,382 +622,45 @@ function removeXhttpProxies(content) {
 		if (!isXhttp) {
 			result.push(...blockLines);
 		} else {
-			console.log('[clashFix] 已移除 xhttp 误转节点（network: h2 + reality-opts + h2-opts path）');
+			console.log('[removeXhttpProxies] 已移除 xhttp 误转节点');
 		}
-	}
-
-	return result.join(lineBreak);
-}
-
-// 解析 subConfig INI 配置文件，提取 ruleset 条目
-async function parseSubConfig(configUrl) {
-	try {
-		const response = await fetch(configUrl);
-		if (!response.ok) return [];
-		const text = await response.text();
-		const lines = text.split(/\r?\n/);
-		const rulesets = [];
-		for (const line of lines) {
-			const trimmed = line.trim();
-			if (trimmed.startsWith(';') || trimmed === '') continue;
-			if (trimmed.startsWith('ruleset=')) {
-				const value = trimmed.substring('ruleset='.length);
-				const commaIndex = value.indexOf(',');
-				if (commaIndex === -1) continue;
-				const group = value.substring(0, commaIndex).trim();
-				const target = value.substring(commaIndex + 1).trim();
-				if (target.startsWith('[]')) {
-					// 内置规则如 []GEOIP,CN,no-resolve 或 []FINAL，保留为 inline rule
-					rulesets.push({ group, type: 'inline', rule: target.substring(2) });
-				} else if (target.startsWith('http')) {
-					// 远程规则集 URL
-					rulesets.push({ group, type: 'url', url: target, behavior: 'classical' });
-				} else if (target.startsWith('clash-domain:')) {
-					// clash-domain: 前缀，behavior 为 domain
-					rulesets.push({ group, type: 'url', url: target.substring('clash-domain:'.length), behavior: 'domain' });
-				} else if (target.startsWith('clash-ipcidr:')) {
-					// clash-ipcidr: 前缀，behavior 为 ipcidr
-					rulesets.push({ group, type: 'url', url: target.substring('clash-ipcidr:'.length), behavior: 'ipcidr' });
-				} else if (target.startsWith('clash-classical:')) {
-					// clash-classical: 前缀，behavior 为 classical
-					rulesets.push({ group, type: 'url', url: target.substring('clash-classical:'.length), behavior: 'classical' });
-				}
-			}
-		}
-		return rulesets;
-	} catch (e) {
-		console.log('解析 subConfig 失败: ' + e.message);
-		return [];
-	}
-}
-
-// 将 Clash 配置中的 inline rules 替换为 rule-providers 格式
-function convertRulesToProviders(content, rulesets) {
-	// 检查是否已经有 rule-providers（避免重复转换）
-	if (content.includes('rule-providers:')) return content;
-	// 检查是否有 rules 段
-	if (!content.includes('rules:')) return content;
-
-	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
-	const lines = content.split(lineBreak);
-
-	// 找到 rules: 段的位置
-	let rulesStartIndex = -1;
-	let rulesEndIndex = -1;
-	for (let i = 0; i < lines.length; i++) {
-		if (lines[i].trim() === 'rules:') {
-			rulesStartIndex = i;
-			continue;
-		}
-		if (rulesStartIndex !== -1 && rulesEndIndex === -1) {
-			// rules 段中的行以 "  -" 开头
-			if (!lines[i].trim().startsWith('-') && lines[i].trim() !== '') {
-				rulesEndIndex = i;
-			}
-		}
-	}
-	if (rulesStartIndex === -1) return content;
-	if (rulesEndIndex === -1) rulesEndIndex = lines.length;
-
-	// 生成 rule-providers 和新的 rules
-	const ruleProviders = {};
-	const newRules = [];
-	let providerIndex = 0;
-
-	for (const ruleset of rulesets) {
-		if (ruleset.type === 'inline') {
-			// GEOIP,CN / GEOIP,CN,no-resolve / FINAL 等内置规则
-			const rule = ruleset.rule;
-			if (rule === 'FINAL') {
-				newRules.push(`  - MATCH,${ruleset.group}`);
-			} else if (rule.endsWith(',no-resolve')) {
-				// GEOIP,CN,no-resolve -> GEOIP,CN,GROUP,no-resolve
-				const ruleBase = rule.slice(0, -',no-resolve'.length);
-				newRules.push(`  - ${ruleBase},${ruleset.group},no-resolve`);
-			} else {
-				newRules.push(`  - ${rule},${ruleset.group}`);
-			}
-		} else if (ruleset.type === 'url') {
-			// 远程规则集 -> rule-provider
-			const url = ruleset.url;
-			// 从 URL 提取 provider 名称
-			let providerName = url.split('/').pop().replace(/\.list$|\.yaml$|\.txt$/i, '').toLowerCase();
-			// 确保名称唯一
-			if (ruleProviders[providerName]) {
-				providerName = providerName + '_' + providerIndex;
-			}
-			providerIndex++;
-
-			// 根据 URL 中的文件扩展名和路径判断 behavior
-			let behavior = ruleset.behavior || 'classical';  // 使用 INI 指定的 behavior，默认 classical
-
-			ruleProviders[providerName] = {
-				type: 'http',
-				behavior: behavior,
-				url: url,
-				path: `./ruleset/${providerName}.yaml`,
-				interval: 86400
-			};
-
-			newRules.push(`  - RULE-SET,${providerName},${ruleset.group}`);
-		}
-	}
-
-	// 构建 rule-providers YAML 文本
-	let rpText = 'rule-providers:' + lineBreak;
-	for (const [name, provider] of Object.entries(ruleProviders)) {
-		rpText += `  ${name}:` + lineBreak;
-		rpText += `    type: ${provider.type}` + lineBreak;
-		rpText += `    behavior: ${provider.behavior}` + lineBreak;
-		rpText += `    url: "${provider.url}"` + lineBreak;
-		rpText += `    path: ${provider.path}` + lineBreak;
-		rpText += `    interval: ${provider.interval}` + lineBreak;
-	}
-
-	// 构建新的 rules 段
-	let rulesText = 'rules:' + lineBreak;
-	for (const rule of newRules) {
-		rulesText += rule + lineBreak;
-	}
-
-	// 替换原始内容
-	const beforeRules = lines.slice(0, rulesStartIndex).join(lineBreak);
-	const afterRules = lines.slice(rulesEndIndex).join(lineBreak);
-
-	return beforeRules + lineBreak + rpText + lineBreak + rulesText + afterRules;
-}
-
-// 从原始节点链接中提取 emoji 映射：baseName -> emoji
-function extractEmojiMap(nodeText) {
-	const emojiMap = {};
-	const lines = nodeText.split('\n');
-	for (const line of lines) {
-		const trimmed = line.trim();
-		if (!trimmed) continue;
-		let name = '';
-		try {
-			if (trimmed.startsWith('vmess://')) {
-				const b64 = trimmed.substring(8);
-				const json = JSON.parse(base64Decode(b64));
-				name = json.ps || '';
-			} else if (trimmed.startsWith('vless://') || trimmed.startsWith('trojan://') || trimmed.startsWith('ss://') || trimmed.startsWith('ssr://')) {
-				const hash = trimmed.lastIndexOf('#');
-				if (hash !== -1) {
-					name = decodeURIComponent(trimmed.substring(hash + 1));
-				}
-			}
-		} catch (e) {
-			continue;
-		}
-		if (!name) continue;
-
-		// 匹配开头的 emoji 国旗（两个区域指示符组成一个国旗）
-		const match = name.match(/^([\u{1F1E6}-\u{1F1FF}]{2}\s*)/u);
-		if (match) {
-			const emoji = match[1].trim();
-			const baseName = name.substring(match[1].length).trim();
-			if (baseName && !emojiMap[baseName]) {
-				emojiMap[baseName] = emoji;
-			}
-		}
-	}
-	return emojiMap;
-}
-
-// 恢复 Clash 配置中被 subconverter 去掉的 emoji 国旗
-function restoreEmoji(content, nodeText) {
-	const emojiMap = extractEmojiMap(nodeText);
-	if (Object.keys(emojiMap).length === 0) return content;
-
-	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
-
-	// 按 baseName 长度降序排列，避免短名称部分匹配长名称
-	const entries = Object.entries(emojiMap).sort((a, b) => b[0].length - a[0].length);
-
-	for (const [baseName, emoji] of entries) {
-		const withEmoji = `${emoji} ${baseName}`;
-
-		// 如果配置中已经有这个 emoji+名称，跳过
-		if (content.includes(withEmoji)) continue;
-		// 如果 baseName 不在配置中，跳过
-		if (!content.includes(baseName)) continue;
-
-		// 替换代理定义中的 name 字段: name: baseName,
-		content = content.replaceAll(`name: ${baseName},`, `name: ${withEmoji},`);
-		// 替换代理列表引用: - baseName (行尾)
-		content = content.replaceAll(`- ${baseName}${lineBreak}`, `- ${withEmoji}${lineBreak}`);
-
-		// 处理编号副本: baseName 2, baseName 3, ...
-		for (let i = 2; i <= 50; i++) {
-			const numbered = `${baseName} ${i}`;
-			const numberedWithEmoji = `${emoji} ${numbered}`;
-			if (content.includes(numberedWithEmoji)) continue;
-			if (!content.includes(numbered)) break;
-
-			content = content.replaceAll(`name: ${numbered},`, `name: ${numberedWithEmoji},`);
-			content = content.replaceAll(`- ${numbered}${lineBreak}`, `- ${numberedWithEmoji}${lineBreak}`);
-		}
-	}
-
-	return content;
-}
-
-// 根据代理名称中的 emoji 国旗，重新分配节点到对应的国家代理组
-function fixProxyGroups(content) {
-	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
-	const lines = content.split(lineBreak);
-
-	// 第1步：只扫顶级 proxies: 段，提取节点名
-	const allProxyNames = [];
-	// 顶级段名集合（行首无缩进的 key:）
-	const TOP_LEVEL_KEYS = /^[a-zA-Z][a-zA-Z0-9_-]*:/;
-	let section = ''; // 当前顶级段
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i];
-		// 检测顶级字段切换（行首无空白）
-		if (TOP_LEVEL_KEYS.test(line)) {
-			section = line.split(':')[0].trim();
-			continue;
-		}
-		if (section === 'proxies') {
-			const nameMatch = line.match(/name:\s*"?([^",}\r\n]+)"?\s*[,}]/);
-			if (nameMatch) allProxyNames.push(nameMatch[1].trim());
-		}
-	}
-
-	// 第2步：按 emoji 国旗分组
-	const flagToProxies = {};
-	for (const name of allProxyNames) {
-		const match = name.match(/^([\u{1F1E6}-\u{1F1FF}]{2})\s/u);
-		if (match) {
-			const flag = match[1];
-			if (!flagToProxies[flag]) flagToProxies[flag] = [];
-			flagToProxies[flag].push(name);
-		}
-	}
-	if (Object.keys(flagToProxies).length === 0) return content;
-
-	// 第3步：逐行处理，仅在 proxy-groups 段内、且当前组是国家组时替换其 proxies 列表
-	const result = [];
-	let topSection = ''; // 当前顶级段
-	let currentGroupFlag = null; // 当前 proxy-group 对应的国旗，null 表示非国家组
-	let inGroupProxiesList = false; // 是否在该 group 的 proxies 子列表内
-	let proxiesIndent = ''; // proxies: 行的缩进
-	let addedNewProxies = false;
+		blockLines = [];
+	};
 
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
-		const trimmed = line.trim();
 
 		// 检测顶级段切换
-		if (TOP_LEVEL_KEYS.test(line)) {
+		if (TOP.test(line)) {
+			flushBlock();
 			topSection = line.split(':')[0].trim();
-			currentGroupFlag = null;
-			inGroupProxiesList = false;
-			addedNewProxies = false;
 			result.push(line);
 			continue;
 		}
 
-		if (topSection !== 'proxy-groups') {
+		// 只在顶级 proxies: 段内处理
+		if (topSection !== 'proxies') {
+			flushBlock();
 			result.push(line);
 			continue;
 		}
 
-		// === 在 proxy-groups 段内 ===
-
-		// 检测新 group 开始（以 "  - name:" 开头）
-		if (/^\s+- name:/.test(line) || /^\s+- \{name:/.test(line)) {
-			inGroupProxiesList = false;
-			addedNewProxies = false;
-			currentGroupFlag = null;
-			const flagMatch = line.match(/name:\s*"?([\u{1F1E6}-\u{1F1FF}]{2})\s/u);
-			if (flagMatch && flagToProxies[flagMatch[1]]) {
-				currentGroupFlag = flagMatch[1];
-			}
-			result.push(line);
+		// proxies 段内：检测新节点块（以 "  - {name:" 开头）
+		if (/^\s+- \{?name:/.test(line)) {
+			flushBlock();
+			blockLines = [line];
 			continue;
 		}
 
-		// 检测国家组内的 proxies: 子段（有缩进）
-		if (currentGroupFlag && trimmed === 'proxies:' && line !== 'proxies:' && line !== 'proxies:\r') {
-			inGroupProxiesList = true;
-			proxiesIndent = line.match(/^(\s*)/)[1];
+		if (blockLines.length > 0) {
+			blockLines.push(line);
+		} else {
 			result.push(line);
-			// 追加新的代理列表
-			for (const proxyName of flagToProxies[currentGroupFlag]) {
-				result.push(`${proxiesIndent}  - ${proxyName}`);
-			}
-			addedNewProxies = true;
-			continue;
 		}
-
-		// 跳过国家组的旧代理列表行
-		if (inGroupProxiesList && addedNewProxies) {
-			const lineIndent = line.match(/^(\s*)/)[1].length;
-			const expectedIndent = proxiesIndent.length + 2;
-			if (lineIndent >= expectedIndent && trimmed.startsWith('-')) {
-				continue; // 旧列表项，跳过
-			} else {
-				// 列表结束
-				inGroupProxiesList = false;
-				addedNewProxies = false;
-				// 如果是新的 group 起始行，重新处理
-				if (/^\s+- name:/.test(line) || /^\s+- \{name:/.test(line)) {
-					currentGroupFlag = null;
-					const flagMatch = line.match(/name:\s*"?([\u{1F1E6}-\u{1F1FF}]{2})\s/u);
-					if (flagMatch && flagToProxies[flagMatch[1]]) {
-						currentGroupFlag = flagMatch[1];
-					}
-				}
-				result.push(line);
-				continue;
-			}
-		}
-
-		result.push(line);
 	}
+	flushBlock();
 
 	return result.join(lineBreak);
-}
-async function proxyURL(proxyURL, url) {
-	const URLs = await ADD(proxyURL);
-	const fullURL = URLs[Math.floor(Math.random() * URLs.length)];
-
-	// 解析目标 URL
-	let parsedURL = new URL(fullURL);
-	console.log(parsedURL);
-	// 提取并可能修改 URL 组件
-	let URLProtocol = parsedURL.protocol.slice(0, -1) || 'https';
-	let URLHostname = parsedURL.hostname;
-	let URLPathname = parsedURL.pathname;
-	let URLSearch = parsedURL.search;
-
-	// 处理 pathname
-	if (URLPathname.charAt(URLPathname.length - 1) == '/') {
-		URLPathname = URLPathname.slice(0, -1);
-	}
-	URLPathname += url.pathname;
-
-	// 构建新的 URL
-	let newURL = `${URLProtocol}://${URLHostname}${URLPathname}${URLSearch}`;
-
-	// 反向代理请求
-	let response = await fetch(newURL);
-
-	// 创建新的响应
-	let newResponse = new Response(response.body, {
-		status: response.status,
-		statusText: response.statusText,
-		headers: response.headers
-	});
-
-	// 添加自定义头部，包含 URL 信息
-	//newResponse.headers.set('X-Proxied-By', 'Cloudflare Worker');
-	//newResponse.headers.set('X-Original-URL', fullURL);
-	newResponse.headers.set('X-New-URL', newURL);
-
-	return newResponse;
 }
 
 async function getSUB(api, request, 追加UA, userAgentHeader) {
