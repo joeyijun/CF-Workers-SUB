@@ -212,6 +212,7 @@ export default {
 					try {
 						subConverterContent = restoreEmoji(subConverterContent, result);
 						// 根据恢复的 emoji 重新分配节点到对应国家组
+						subConverterContent = fixAdvancedFeatures(subConverterContent, result);
 						subConverterContent = fixProxyGroups(subConverterContent);
 					} catch (e) {
 						console.log('emoji/分组恢复失败: ' + e.message);
@@ -320,29 +321,85 @@ async function MD5MD5(text) {
 	return secondHex.toLowerCase();
 }
 
+// 增强版 Clash 修复函数
 function clashFix(content) {
-	if (content.includes('wireguard') && !content.includes('remote-dns-resolve')) {
-		let lines;
-		if (content.includes('\r\n')) {
-			lines = content.split('\r\n');
-		} else {
-			lines = content.split('\n');
-		}
+    // 处理 Wireguard 远程解析
+    if (content.includes('wireguard') && !content.includes('remote-dns-resolve')) {
+        content = content.replace(/type: wireguard/g, 'type: wireguard, mtu: 1280, remote-dns-resolve: true, udp: true');
+    }
+    
+    // 强制开启所有节点的 UDP，确保延迟测试正常
+    content = content.replace(/type: (vless|vmess|trojan|ss|ssr)/g, 'type: $1, udp: true');
+    
+    return content;
+}
 
-		let result = "";
-		for (let line of lines) {
-			if (line.includes('type: wireguard')) {
-				const 备改内容 = `, mtu: 1280, udp: true`;
-				const 正确内容 = `, mtu: 1280, remote-dns-resolve: true, udp: true`;
-				result += line.replace(new RegExp(备改内容, 'g'), 正确内容) + '\n';
-			} else {
-				result += line + '\n';
-			}
-		}
+// 新增：专门修复 xHTTP 和 Reality (针对 Trojan 等) 的函数
+function fixAdvancedFeatures(content, nodeText) {
+    const lines = nodeText.split('\n');
+    const advancedMap = {};
 
-		content = result;
-	}
-	return content;
+    // 1. 从原始链接中提取高级参数映射
+    for (const line of lines) {
+        try {
+            const trimmed = line.trim();
+            if (!trimmed || (!trimmed.startsWith('vless://') && !trimmed.startsWith('trojan://'))) continue;
+            
+            const parts = trimmed.split('#');
+            const name = decodeURIComponent(parts[1] || "");
+            const params = new URLSearchParams(parts[0].includes('?') ? parts[0].split('?')[1] : "");
+            
+            if (name) {
+                advancedMap[name] = {
+                    security: params.get('security'),
+                    pbk: params.get('pbk'),
+                    sid: params.get('sid'),
+                    type: params.get('type'),
+                    path: params.get('path'),
+                    host: params.get('host'),
+                    serviceName: params.get('serviceName')
+                };
+            }
+        } catch (e) {}
+    }
+
+    // 2. 遍历 YAML 进行精确修复
+    for (const [baseName, info] of Object.entries(advancedMap)) {
+        // 匹配可能包含 Emoji 前缀的节点名
+        const escapedName = baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const nameRegex = new RegExp(`name:\\s*"?([^",}]*${escapedName}[^",}]*)"?`, 'g');
+        
+        let match;
+        while ((match = nameRegex.exec(content)) !== null) {
+            const fullName = match[1].trim();
+            
+            // 修复 xHTTP (Subconverter 常误转为 h2)
+            if (info.type === 'xhttp') {
+                const nodeSectionRegex = new RegExp(`({name:\\s*"?${fullName}"?[^}]*})`, 'g');
+                content = content.replace(nodeSectionRegex, (m) => {
+                    return m.replace('network: h2', 'network: xhttp')
+                            .replace('h2-opts', 'xhttp-opts');
+                });
+            }
+
+            // 修复 Trojan-Reality (Subconverter 常丢失 reality-opts)
+            if (info.security === 'reality' && info.pbk && !content.includes(`public-key: ${info.pbk}`)) {
+                const realitySnippet = `, reality-opts: {public-key: ${info.pbk}, short-id: "${info.sid || ""}" }`;
+                const nodeSectionRegex = new RegExp(`({name:\\s*"?${fullName}"?[^}]*})`, 'g');
+                content = content.replace(nodeSectionRegex, (m) => {
+                    if (m.includes('reality-opts')) return m;
+                    return m.replace('}', realitySnippet + '}');
+                });
+            }
+            
+            // 修复 gRPC 服务名为空的问题
+            if (info.type === 'grpc' && (info.serviceName === '/' || !info.serviceName)) {
+                const grpcFixRegex = new RegExp(`(name:\\s*"?${fullName}"?[^}]*grpc-service-name:\\s*)"?\/?"?`, 'g');
+                content = content.replace(grpcFixRegex, '$1 ""');
+            }
+        }
+    }
+    return content;
 }
 
 // 解析 subConfig INI 配置文件，提取 ruleset 条目
@@ -1147,4 +1204,5 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 		});
 	}
 }
+
 
