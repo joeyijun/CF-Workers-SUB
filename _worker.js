@@ -912,6 +912,28 @@ function fixGroupBlock(lines) {
 	return result;
 }
 
+// 为 network: grpc 但缺少 grpc-opts 的节点（单行格式）补上 grpc-opts
+// Mihomo 处理 gRPC 节点时需要 grpc-opts，缺失会导致连接失败
+function fixMissingGrpcOpts(content) {
+	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
+	const lines = content.split(lineBreak);
+	const result = [];
+
+	for (const line of lines) {
+		// 只处理 proxies 段的单行节点（以 "  - {" 开头，含 network: grpc，不含 grpc-opts）
+		if (line.trim().startsWith('- {') &&
+			line.includes('network: grpc') &&
+			!line.includes('grpc-opts')) {
+			// 在行尾 } 前插入 grpc-opts
+			const fixed = line.replace(/,?\s*\}$/, ', grpc-opts: {grpc-mode: gun, grpc-service-name: ""}}');
+			result.push(fixed);
+		} else {
+			result.push(line);
+		}
+	}
+	return result.join(lineBreak);
+}
+
 function clashFix(content) {
 	// ===== 最优先：修复 subconverter 输出的 proxy-groups 结构错误 =====
 	// subconverter 存在 bug：proxy-groups 中每个组末尾多一个空的 proxies:，
@@ -950,7 +972,11 @@ function clashFix(content) {
 	// 原始节点 serviceName= 为空，转换后应为 "" 而非 "/"
 	content = content.replace(/grpc-service-name:\s*["']?\/["']?(\s*[,}])/g, 'grpc-service-name: ""$1');
 
-	// ===== 修复3：Trojan/VLESS + gRPC + REALITY 节点 reality-opts 丢失问题 =====
+	// ===== 修复3：为 network: grpc 但缺少 grpc-opts 的节点补上 grpc-opts =====
+	// subconverter 转换 Trojan+gRPC 时有时会丢失 grpc-opts，Mihomo 需要此字段
+	content = fixMissingGrpcOpts(content);
+
+	// ===== 修复4：Trojan/VLESS + gRPC + REALITY 节点 reality-opts 丢失问题 =====
 	// subconverter 在转换 Trojan+gRPC+REALITY 时可能丢失 reality-opts，
 	// 导致节点变成普通 TLS 而连接失败。此问题需从原始节点链接重新注入。
 	// （已在 injectRealityOpts 中处理，见下方函数）
