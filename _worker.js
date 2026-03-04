@@ -707,7 +707,14 @@ function clashFix(content) {
 	// subconverter 存在 bug：proxy-groups 中每个组末尾多一个空的 proxies:，
 	// 且部分组的节点列表游离在 proxies: 标头之外，导致 yaml 结构混乱无法使用。
 	content = fixSubconverterGroupStructure(content);
-	// ===== 修复：清理 proxy-groups 中引用了不存在节点的条目 =====
+	
+	// ===== 修复1：移除 xhttp 传输协议的节点（Clash/Mihomo 不支持 xhttp）=====
+	// xhttp 是 Xray 专有协议，subconverter 会将其错误转换为 h2，导致连接失败
+	// 必须在 removeGhostProxyRefs 之前运行！！！
+	content = removeXhttpProxies(content);
+
+	// ===== 修复2：清理 proxy-groups 中引用了不存在节点的条目 =====
+	// 现在执行时，xhttp 节点已经被彻底删除了，所以会正确清理掉对应的组内引用
 	content = removeGhostProxyRefs(content);
 
 	if (content.includes('wireguard') && !content.includes('remote-dns-resolve')) {
@@ -732,16 +739,11 @@ function clashFix(content) {
 		content = result;
 	}
 
-	// ===== 修复1：移除 xhttp 传输协议的节点（Clash/Mihomo 不支持 xhttp）=====
-	// xhttp 是 Xray 专有协议，subconverter 会将其错误转换为 h2，导致连接失败
-	// 此类节点请使用 v2rayN / NekoBox 等 Xray 内核客户端
-	content = removeXhttpProxies(content);
-
-	// ===== 修复2：gRPC service-name 为空时被错误写成 "/" 的问题 =====
+	// ===== 修复3：gRPC service-name 为空时被错误写成 "/" 的问题 =====
 	// 原始节点 serviceName= 为空，转换后应为 "" 而非 "/"
 	content = content.replace(/grpc-service-name:\s*["']?\/["']?(\s*[,}])/g, 'grpc-service-name: ""$1');
 
-	// ===== 修复3：Trojan/VLESS + gRPC + REALITY 节点 reality-opts 丢失问题 =====
+	// ===== 修复4：Trojan/VLESS + gRPC + REALITY 节点 reality-opts 丢失问题 =====
 	// subconverter 在转换 Trojan+gRPC+REALITY 时可能丢失 reality-opts，
 	// 导致节点变成普通 TLS 而连接失败。此问题需从原始节点链接重新注入。
 	// （已在 injectRealityOpts 中处理，见下方函数）
@@ -1408,3 +1410,4 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 		});
 	}
 }
+
