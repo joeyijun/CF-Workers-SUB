@@ -329,6 +329,283 @@ async function MD5MD5(text) {
 // Bug1: 每个 group 末尾多一个空的 proxies: 行
 // Bug2: 部分 group 的节点列表游离在外（没有 proxies: 标头）
 // 修复：收集每个 group 的所有节点项（无论游离还是在 proxies: 下），重建为标准结构
+function extractEmojiMap(nodeText) {
+	const emojiMap = {};
+	const lines = nodeText.split('\n');
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		let name = '';
+		try {
+			if (trimmed.startsWith('vmess://')) {
+				const b64 = trimmed.substring(8);
+				const json = JSON.parse(base64Decode(b64));
+				name = json.ps || '';
+			} else if (trimmed.startsWith('vless://') || trimmed.startsWith('trojan://') || trimmed.startsWith('ss://') || trimmed.startsWith('ssr://')) {
+				const hash = trimmed.lastIndexOf('#');
+				if (hash !== -1) {
+					name = decodeURIComponent(trimmed.substring(hash + 1));
+				}
+			}
+		} catch (e) {
+			continue;
+		}
+		if (!name) continue;
+
+		// 匹配开头的 emoji 国旗（两个区域指示符组成一个国旗）
+		const match = name.match(/^([\u{1F1E6}-\u{1F1FF}]{2}\s*)/u);
+		if (match) {
+			const emoji = match[1].trim();
+			const baseName = name.substring(match[1].length).trim();
+			if (baseName && !emojiMap[baseName]) {
+				emojiMap[baseName] = emoji;
+			}
+		}
+	}
+	return emojiMap;
+}
+
+// 恢复 Clash 配置中被 subconverter 去掉的 emoji 国旗
+function restoreEmoji(content, nodeText) {
+	const emojiMap = extractEmojiMap(nodeText);
+	if (Object.keys(emojiMap).length === 0) return content;
+
+	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
+
+	// 按 baseName 长度降序排列，避免短名称部分匹配长名称
+	const entries = Object.entries(emojiMap).sort((a, b) => b[0].length - a[0].length);
+
+	for (const [baseName, emoji] of entries) {
+		const withEmoji = `${emoji} ${baseName}`;
+
+		// 如果配置中已经有这个 emoji+名称，跳过
+		if (content.includes(withEmoji)) continue;
+		// 如果 baseName 不在配置中，跳过
+		if (!content.includes(baseName)) continue;
+
+		// 替换代理定义中的 name 字段: name: baseName,
+		content = content.replaceAll(`name: ${baseName},`, `name: ${withEmoji},`);
+		// 替换代理列表引用: - baseName (行尾)
+		content = content.replaceAll(`- ${baseName}${lineBreak}`, `- ${withEmoji}${lineBreak}`);
+
+		// 处理编号副本: baseName 2, baseName 3, ...
+		for (let i = 2; i <= 50; i++) {
+			const numbered = `${baseName} ${i}`;
+			const numberedWithEmoji = `${emoji} ${numbered}`;
+			if (content.includes(numberedWithEmoji)) continue;
+			if (!content.includes(numbered)) break;
+
+			content = content.replaceAll(`name: ${numbered},`, `name: ${numberedWithEmoji},`);
+			content = content.replaceAll(`- ${numbered}${lineBreak}`, `- ${numberedWithEmoji}${lineBreak}`);
+		}
+	}
+
+	return content;
+}
+
+
+// 根据代理名称中的 emoji 国旗，重新分配节点到对应的国家代理组
+function fixProxyGroups(content) {
+	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
+	const lines = content.split(lineBreak);
+	const TOP = /^[a-zA-Z][a-zA-Z0-9_-]*:/;
+
+	// 第1步：只扫顶级 proxies: 段，提取节点名
+	const allProxyNames = [];
+	let section = '';
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		if (TOP.test(line)) {
+			section = line.split(':')[0].trim();
+			continue;
+		}
+		if (section === 'proxies') {
+			const nameMatch = line.match(/name:\s*"?([^",}\r\n]+)"?\s*[,}]/);
+			if (nameMatch) allProxyNames.push(nameMatch[1].trim());
+		}
+	}
+
+	// 第2步：按 emoji 国旗分组
+	const flagToProxies = {};
+	for (const name of allProxyNames) {
+		const match = name.match(/^([\u{1F1E6}-\u{1F1FF}]{2})\s/u);
+		if (match) {
+			const flag = match[1];
+			if (!flagToProxies[flag]) flagToProxies[flag] = [];
+			flagToProxies[flag].push(name);
+		}
+	}
+	if (Object.keys(flagToProxies).length === 0) return content;
+
+	// 第3步：逐行处理，仅在 proxy-groups 段内、且当前组是国家组时替换其 proxies 列表
+	const result = [];
+	let topSection = '';
+	let currentGroupFlag = null;
+	let inGroupProxiesList = false;
+	let proxiesIndent = '';
+	let addedNewProxies = false;
+
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		const trimmed = line.trim();
+
+		if (TOP.test(line)) {
+			topSection = line.split(':')[0].trim();
+			currentGroupFlag = null;
+			inGroupProxiesList = false;
+			addedNewProxies = false;
+			result.push(line);
+			continue;
+		}
+
+		if (topSection !== 'proxy-groups') {
+			result.push(line);
+			continue;
+		}
+
+		// 检测新 group 开始
+		if (/^\s+- name:/.test(line) || /^\s+- \{name:/.test(line)) {
+			inGroupProxiesList = false;
+			addedNewProxies = false;
+			currentGroupFlag = null;
+			const flagMatch = line.match(/name:\s*"?([\u{1F1E6}-\u{1F1FF}]{2})\s/u);
+			if (flagMatch && flagToProxies[flagMatch[1]]) {
+				currentGroupFlag = flagMatch[1];
+			}
+			result.push(line);
+			continue;
+		}
+
+		// 检测国家组内有缩进的 proxies: 子段（排除顶级 proxies:）
+		if (currentGroupFlag && trimmed === 'proxies:' && line !== 'proxies:' && line !== 'proxies:\r') {
+			inGroupProxiesList = true;
+			proxiesIndent = line.match(/^(\s*)/)[1];
+			result.push(line);
+			for (const proxyName of flagToProxies[currentGroupFlag]) {
+				result.push(`${proxiesIndent}  - ${proxyName}`);
+			}
+			addedNewProxies = true;
+			continue;
+		}
+
+		// 跳过国家组的旧代理列表行
+		if (inGroupProxiesList && addedNewProxies) {
+			const lineIndent = line.match(/^(\s*)/)[1].length;
+			const expectedIndent = proxiesIndent.length + 2;
+			if (lineIndent >= expectedIndent && trimmed.startsWith('-')) {
+				continue;
+			} else {
+				inGroupProxiesList = false;
+				addedNewProxies = false;
+				if (/^\s+- name:/.test(line) || /^\s+- \{name:/.test(line)) {
+					currentGroupFlag = null;
+					const flagMatch = line.match(/name:\s*"?([\u{1F1E6}-\u{1F1FF}]{2})\s/u);
+					if (flagMatch && flagToProxies[flagMatch[1]]) {
+						currentGroupFlag = flagMatch[1];
+					}
+				}
+				result.push(line);
+				continue;
+			}
+		}
+
+		result.push(line);
+	}
+
+	return result.join(lineBreak);
+}
+
+// 清理 proxy-groups 中引用了不存在的节点名的条目
+// 例如 subconverter 有时会在 proxy-groups 里留下原始名（wanxy），
+// 但 proxies 段里实际只有带编号的版本（wanxy 2、wanxy 3）
+function removeGhostProxyRefs(content) {
+	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
+	const lines = content.split(lineBreak);
+	const TOP = /^[a-zA-Z][a-zA-Z0-9_-]*:/;
+
+	// 第1步：收集 proxies 段中所有真实节点名
+	const realNames = new Set();
+	let section = '';
+	for (const line of lines) {
+		if (TOP.test(line)) { section = line.split(':')[0].trim(); continue; }
+		if (section === 'proxies') {
+			const m = line.match(/name:\s*"?([^",}\r\n]+)"?\s*[,}]/);
+			if (m) realNames.add(m[1].trim());
+		}
+	}
+	if (realNames.size === 0) return content;
+
+	// 保留这些特殊关键字（不是节点名，而是 group 引用或内置策略）
+	const KEEP_KEYWORDS = new Set(['DIRECT', 'REJECT', 'GLOBAL']);
+
+	// 第2步：在 proxy-groups 段，过滤掉引用了不存在节点的列表项
+	const result = [];
+	let topSection = '';
+	let inGroupProxies = false;
+	let proxiesIndent = '';
+
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		const trimmed = line.trim();
+
+		if (TOP.test(line)) {
+			topSection = line.split(':')[0].trim();
+			inGroupProxies = false;
+			result.push(line);
+			continue;
+		}
+
+		if (topSection !== 'proxy-groups') {
+			result.push(line);
+			continue;
+		}
+
+		// 新 group 开始，重置状态
+		if (/^\s+- name:/.test(line) || /^\s+- \{name:/.test(line)) {
+			inGroupProxies = false;
+			result.push(line);
+			continue;
+		}
+
+		// 检测 proxies: 子段
+		if (trimmed === 'proxies:' && line !== 'proxies:' && line !== 'proxies:\r') {
+			inGroupProxies = true;
+			proxiesIndent = line.match(/^(\s*)/)[1];
+			result.push(line);
+			continue;
+		}
+
+		// 在 proxies 子列表中：过滤幽灵引用
+		if (inGroupProxies && trimmed.startsWith('- ')) {
+			const lineIndent = line.match(/^(\s*)/)[1].length;
+			if (lineIndent > proxiesIndent.length) {
+				const refName = trimmed.substring(2).trim();
+				// 保留：是真实节点名、是 group 名（含 emoji 等特殊字符）、是内置关键字
+				const isRealNode = realNames.has(refName);
+				const isKeyword = KEEP_KEYWORDS.has(refName);
+				// 含 emoji 或特殊字符的 group 引用（如 ♻️ 自动选择）保留
+				const isGroupRef = /[\u{1F300}-\u{1F9FF}♻️⚖️🚀Ⓜ️]/u.test(refName) || refName.startsWith('🇺') || refName.startsWith('🇸') || refName.startsWith('🇯') || refName.startsWith('🇭');
+				if (!isRealNode && !isKeyword && !isGroupRef) {
+					console.log(`[removeGhostProxyRefs] 已移除幽灵引用: "${refName}"`);
+					continue; // 跳过这个幽灵条目
+				}
+				result.push(line);
+				continue;
+			} else {
+				inGroupProxies = false;
+			}
+		}
+
+		if (inGroupProxies && !trimmed.startsWith('-')) {
+			inGroupProxies = false;
+		}
+
+		result.push(line);
+	}
+
+	return result.join(lineBreak);
+}
+
 function fixSubconverterGroupStructure(content) {
 	const lb = content.includes('\r\n') ? '\r\n' : '\n';
 	const lines = content.split(lb);
@@ -424,6 +701,8 @@ function clashFix(content) {
 	// subconverter 存在 bug：proxy-groups 中每个组末尾多一个空的 proxies:，
 	// 且部分组的节点列表游离在 proxies: 标头之外，导致 yaml 结构混乱无法使用。
 	content = fixSubconverterGroupStructure(content);
+	// ===== 修复：清理 proxy-groups 中引用了不存在节点的条目 =====
+	content = removeGhostProxyRefs(content);
 
 	if (content.includes('wireguard') && !content.includes('remote-dns-resolve')) {
 		let lines;
