@@ -1,4 +1,3 @@
-
 // 部署完成后在网址后面加上这个，获取自建节点和机场聚合节点，/?token=auto或/auto或
 
 let mytoken = 'auto';
@@ -207,41 +206,37 @@ export default {
 				if (!subConverterResponse.ok) return new Response(base64Data, { headers: responseHeaders });
 				let subConverterContent = await subConverterResponse.text();
 				if (订阅格式 == 'clash') {
-                subConverterUrl = `${subProtocol}://${subConverter}/sub?target=clash&url=${encodeURIComponent(订阅转换URL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=false&list=false&tfo=false&scv=true&fdn=false&sort=false&new_name=true&rule-providers=true`;
-                
-                try {
-                    const subConverterResponse = await fetch(subConverterUrl, { headers: { 'User-Agent': userAgentHeader } });
-                    if (!subConverterResponse.ok) return new Response(base64Data, { headers: responseHeaders });
-                    
-                    let content = await subConverterResponse.text();
-
-                    // --- 强力修复逻辑：直接进行全局字符串替换 ---
-                    // 1. 修复 xhttp (解决 wanxy 节点)
-                    // 将被误转的 network: h2 换回 network: xhttp，并修正 opts
-                    content = content.replace(/network: h2, h2-opts: {path: ([^,}]*), host: \[([^\]]*)\]}/g, 'network: xhttp, xhttp-opts: {path: $1, host: $2}');
-                    
-                    // 2. 修复 gRPC 的斜杠问题 (解决 wanxy 2)
-                    content = content.replace(/grpc-service-name: \//g, 'grpc-service-name: ""');
-                    
-                    // 3. 补全 Reality (针对 Trojan 等可能丢失的情况，这一步通过 subconverter 的 &scv=true 通常能保留，如果还丢，建议检查原始链接)
-
-                    // 4. 这里的内置修复函数也要执行
-                    content = await clashFix(content);
-                    
-                    try {
-                        content = restoreEmoji(content, result);
-                        content = fixProxyGroups(content);
-                    } catch (e) {
-                        console.log('Emoji/分组恢复失败');
-                    }
-
-                    if (!userAgent.includes('mozilla')) responseHeaders["Content-Disposition"] = `attachment; filename*=utf-8''${encodeURIComponent(FileName)}`;
-                    return new Response(content, { headers: responseHeaders });
-
-                } catch (error) {
-                    return new Response(base64Data, { headers: responseHeaders });
-                }
-            }
+					subConverterContent = await clashFix(subConverterContent);
+					// 恢复被 subconverter 去掉的 emoji 国旗
+					try {
+						subConverterContent = restoreEmoji(subConverterContent, result);
+						// 根据恢复的 emoji 重新分配节点到对应国家组
+						subConverterContent = fixProxyGroups(subConverterContent);
+					} catch (e) {
+						console.log('emoji/分组恢复失败: ' + e.message);
+					}
+					// ===== 修复：从原始节点链接注入缺失的 reality-opts（修复 Trojan+gRPC+REALITY 等） =====
+					try {
+						subConverterContent = injectRealityOpts(subConverterContent, result);
+					} catch (e) {
+						console.log('reality-opts 注入失败: ' + e.message);
+					}
+					// 将 inline rules 转换为 rule-providers 格式
+					try {
+						const rulesets = await parseSubConfig(subConfig);
+						if (rulesets && rulesets.length > 0) {
+							subConverterContent = convertRulesToProviders(subConverterContent, rulesets);
+						}
+					} catch (e) {
+						console.log('rule-providers 转换失败，使用原始 rules: ' + e.message);
+					}
+				}
+				// 只有非浏览器订阅才会返回SUBNAME
+				if (!userAgent.includes('mozilla')) responseHeaders["Content-Disposition"] = `attachment; filename*=utf-8''${encodeURIComponent(FileName)}`;
+				return new Response(subConverterContent, { headers: responseHeaders });
+			} catch (error) {
+				return new Response(base64Data, { headers: responseHeaders });
+			}
 		}
 	}
 };
@@ -330,85 +325,269 @@ async function MD5MD5(text) {
 	return secondHex.toLowerCase();
 }
 
-// 增强版 Clash 修复函数
 function clashFix(content) {
-    // 处理 Wireguard 远程解析
-    if (content.includes('wireguard') && !content.includes('remote-dns-resolve')) {
-        content = content.replace(/type: wireguard/g, 'type: wireguard, mtu: 1280, remote-dns-resolve: true, udp: true');
-    }
-    
-    // 强制开启所有节点的 UDP，确保延迟测试正常
-    content = content.replace(/type: (vless|vmess|trojan|ss|ssr)/g, 'type: $1, udp: true');
-    
-    return content;
+	if (content.includes('wireguard') && !content.includes('remote-dns-resolve')) {
+		let lines;
+		if (content.includes('\r\n')) {
+			lines = content.split('\r\n');
+		} else {
+			lines = content.split('\n');
+		}
+
+		let result = "";
+		for (let line of lines) {
+			if (line.includes('type: wireguard')) {
+				const 备改内容 = `, mtu: 1280, udp: true`;
+				const 正确内容 = `, mtu: 1280, remote-dns-resolve: true, udp: true`;
+				result += line.replace(new RegExp(备改内容, 'g'), 正确内容) + '\n';
+			} else {
+				result += line + '\n';
+			}
+		}
+
+		content = result;
+	}
+
+	// ===== 修复1：移除 xhttp 传输协议的节点（Clash/Mihomo 不支持 xhttp）=====
+	// xhttp 是 Xray 专有协议，subconverter 会将其错误转换为 h2，导致连接失败
+	// 此类节点请使用 v2rayN / NekoBox 等 Xray 内核客户端
+	content = removeXhttpProxies(content);
+
+	// ===== 修复2：gRPC service-name 为空时被错误写成 "/" 的问题 =====
+	// 原始节点 serviceName= 为空，转换后应为 "" 而非 "/"
+	content = content.replace(/grpc-service-name:\s*["']?\/["']?(\s*[,}])/g, 'grpc-service-name: ""$1');
+
+	// ===== 修复3：Trojan/VLESS + gRPC + REALITY 节点 reality-opts 丢失问题 =====
+	// subconverter 在转换 Trojan+gRPC+REALITY 时可能丢失 reality-opts，
+	// 导致节点变成普通 TLS 而连接失败。此问题需从原始节点链接重新注入。
+	// （已在 injectRealityOpts 中处理，见下方函数）
+
+	return content;
 }
 
-// 新增：专门修复 xHTTP 和 Reality (针对 Trojan 等) 的函数
-function fixAdvancedFeatures(content, nodeText) {
-    const lines = nodeText.split('\n');
-    const advancedMap = {};
+// 从原始节点文本中解析 REALITY 参数，注入到 Clash 配置缺失 reality-opts 的节点中
+// 主要修复：Trojan + gRPC + REALITY、VLESS + gRPC + REALITY 经 subconverter 转换后 reality-opts 丢失的问题
+function injectRealityOpts(clashContent, rawNodeText) {
+	// 第1步：从原始节点链接解析 REALITY 参数，建立 uuid/password -> realityInfo 的映射
+	const realityMap = {};
+	const lines = rawNodeText.split('\n');
 
-    // 1. 从原始链接中提取高级参数映射
-    for (const line of lines) {
-        try {
-            const trimmed = line.trim();
-            if (!trimmed || (!trimmed.startsWith('vless://') && !trimmed.startsWith('trojan://'))) continue;
-            
-            const parts = trimmed.split('#');
-            const name = decodeURIComponent(parts[1] || "");
-            const params = new URLSearchParams(parts[0].includes('?') ? parts[0].split('?')[1] : "");
-            
-            if (name) {
-                advancedMap[name] = {
-                    security: params.get('security'),
-                    pbk: params.get('pbk'),
-                    sid: params.get('sid'),
-                    type: params.get('type'),
-                    path: params.get('path'),
-                    host: params.get('host'),
-                    serviceName: params.get('serviceName')
-                };
-            }
-        } catch (e) {}
-    }
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			let params = null;
+			let key = null;
 
-    // 2. 遍历 YAML 进行精确修复
-    for (const [baseName, info] of Object.entries(advancedMap)) {
-        // 匹配可能包含 Emoji 前缀的节点名
-        const escapedName = baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const nameRegex = new RegExp(`name:\\s*"?([^",}]*${escapedName}[^",}]*)"?`, 'g');
-        
-        let match;
-        while ((match = nameRegex.exec(content)) !== null) {
-            const fullName = match[1].trim();
-            
-            // 修复 xHTTP (Subconverter 常误转为 h2)
-            if (info.type === 'xhttp') {
-                const nodeSectionRegex = new RegExp(`({name:\\s*"?${fullName}"?[^}]*})`, 'g');
-                content = content.replace(nodeSectionRegex, (m) => {
-                    return m.replace('network: h2', 'network: xhttp')
-                            .replace('h2-opts', 'xhttp-opts');
-                });
-            }
+			if (trimmed.startsWith('vless://') || trimmed.startsWith('trojan://')) {
+				const withoutScheme = trimmed.replace(/^(vless|trojan):\/\//, '');
+				const atIdx = withoutScheme.indexOf('@');
+				if (atIdx === -1) continue;
+				key = withoutScheme.substring(0, atIdx);
+				const rest = withoutScheme.substring(atIdx + 1);
+				const qIdx = rest.indexOf('?');
+				if (qIdx === -1) continue;
+				const queryAndHash = rest.substring(qIdx + 1);
+				const hashIdx = queryAndHash.lastIndexOf('#');
+				const query = hashIdx !== -1 ? queryAndHash.substring(0, hashIdx) : queryAndHash;
+				params = new URLSearchParams(query);
+			} else {
+				continue;
+			}
 
-            // 修复 Trojan-Reality (Subconverter 常丢失 reality-opts)
-            if (info.security === 'reality' && info.pbk && !content.includes(`public-key: ${info.pbk}`)) {
-                const realitySnippet = `, reality-opts: {public-key: ${info.pbk}, short-id: "${info.sid || ""}" }`;
-                const nodeSectionRegex = new RegExp(`({name:\\s*"?${fullName}"?[^}]*})`, 'g');
-                content = content.replace(nodeSectionRegex, (m) => {
-                    if (m.includes('reality-opts')) return m;
-                    return m.replace('}', realitySnippet + '}');
-                });
-            }
-            
-            // 修复 gRPC 服务名为空的问题
-            if (info.type === 'grpc' && (info.serviceName === '/' || !info.serviceName)) {
-                const grpcFixRegex = new RegExp(`(name:\\s*"?${fullName}"?[^}]*grpc-service-name:\\s*)"?\/?"?`, 'g');
-                content = content.replace(grpcFixRegex, '$1 ""');
-            }
-        }
-    }
-    return content;
+			const security = params.get('security') || '';
+			if (security !== 'reality') continue;
+
+			const pbk = params.get('pbk') || '';
+			const sid = params.get('sid') || '';
+			const sni = params.get('sni') || '';
+			const fp = params.get('fp') || 'chrome';
+			const type = params.get('type') || 'tcp';
+			const serviceName = params.get('serviceName') || '';
+
+			if (!pbk) continue;
+			realityMap[key] = { pbk, sid, sni, fp, type, serviceName };
+		} catch (e) {
+			continue;
+		}
+	}
+
+	if (Object.keys(realityMap).length === 0) return clashContent;
+
+	// 第2步：遍历 Clash 配置，找到缺少 reality-opts 但实际上应该有的节点并注入
+	const lineBreak = clashContent.includes('\r\n') ? '\r\n' : '\n';
+	const clashLines = clashContent.split(lineBreak);
+	const result = [];
+	let inProxiesSection = false;
+
+	for (let i = 0; i < clashLines.length; i++) {
+		const trimmed = clashLines[i].trim();
+
+		if (trimmed === 'proxies:') {
+			inProxiesSection = true;
+			result.push(clashLines[i]);
+			continue;
+		}
+
+		if (inProxiesSection && trimmed !== '' && !trimmed.startsWith('-') && !trimmed.startsWith('#') && !clashLines[i].startsWith('  ') && !clashLines[i].startsWith('\t')) {
+			inProxiesSection = false;
+		}
+
+		// 处理单行内联格式节点
+		if (inProxiesSection && (trimmed.startsWith('- {name:') || trimmed.startsWith('- name:'))) {
+			let lineToProcess = clashLines[i];
+
+			if (!lineToProcess.includes('reality-opts')) {
+				const uuidMatch = lineToProcess.match(/uuid:\s*([0-9a-f-]{36})/i);
+				const pwMatch = lineToProcess.match(/password:\s*([^\s,}]+)/i);
+				const matchKey = (uuidMatch && uuidMatch[1]) || (pwMatch && pwMatch[1]);
+
+				if (matchKey && realityMap[matchKey]) {
+					const ri = realityMap[matchKey];
+					const sidStr = ri.sid ? `"${ri.sid}"` : '""';
+					const realityOpts = `reality-opts: {public-key: ${ri.pbk}, short-id: ${sidStr}}`;
+
+					// 确保 tls: true
+					if (lineToProcess.includes('tls: false')) {
+						lineToProcess = lineToProcess.replace(/tls:\s*false/, 'tls: true');
+					} else if (!lineToProcess.includes('tls:')) {
+						lineToProcess = lineToProcess.replace(/}(\s*)$/, ', tls: true}$1');
+					}
+
+					// 注入 reality-opts 到行末 } 前
+					lineToProcess = lineToProcess.replace(/}(\s*)$/, `, ${realityOpts}}$1`);
+
+					// 注入 servername（如果没有）
+					if (ri.sni && !lineToProcess.includes('servername:')) {
+						lineToProcess = lineToProcess.replace(/}(\s*)$/, `, servername: ${ri.sni}}$1`);
+					}
+
+					// 修复 gRPC service-name 为空时被写成 "/" 的问题
+					if (ri.type === 'grpc' && ri.serviceName === '' && lineToProcess.includes('grpc-opts:')) {
+						lineToProcess = lineToProcess.replace(/grpc-service-name:\s*["']?\/["']?/g, 'grpc-service-name: ""');
+					}
+
+					// 注入 client-fingerprint（如果没有）
+					if (ri.fp && !lineToProcess.includes('client-fingerprint:')) {
+						lineToProcess = lineToProcess.replace(/}(\s*)$/, `, client-fingerprint: ${ri.fp}}$1`);
+					}
+
+					console.log(`[injectRealityOpts] 已注入 reality-opts: key=${matchKey.substring(0, 8)}...`);
+				}
+			} else {
+				// 即使已有 reality-opts，也修复 gRPC service-name 为 "/" 的问题
+				const uuidMatch = lineToProcess.match(/uuid:\s*([0-9a-f-]{36})/i);
+				const pwMatch = lineToProcess.match(/password:\s*([^\s,}]+)/i);
+				const matchKey = (uuidMatch && uuidMatch[1]) || (pwMatch && pwMatch[1]);
+				if (matchKey && realityMap[matchKey]) {
+					const ri = realityMap[matchKey];
+					if (ri.type === 'grpc' && ri.serviceName === '' && lineToProcess.includes('grpc-opts:')) {
+						lineToProcess = lineToProcess.replace(/grpc-service-name:\s*["']?\/["']?/g, 'grpc-service-name: ""');
+					}
+				}
+			}
+
+			result.push(lineToProcess);
+			continue;
+		}
+
+		result.push(clashLines[i]);
+	}
+
+	return result.join(lineBreak);
+}
+
+// 从 proxies 段中移除使用 h2 network 且名称来自 xhttp 转换的节点
+// 判断依据：subconverter 将 xhttp 错误映射为 network: h2，同时带有 reality-opts
+// 真正的 h2+reality 节点极少见，为安全起见仅移除同时满足以下条件的：
+//   1. network: h2（或 network: h2,）
+//   2. 带有 reality-opts
+//   3. h2-opts 中存在 path 字段（xhttp 有 path，纯 h2 极少带 path+reality 组合）
+function removeXhttpProxies(content) {
+	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
+	const lines = content.split(lineBreak);
+
+	let inProxiesSection = false;
+	let skipBlock = false;
+	let blockLines = [];
+	let result = [];
+
+	for (let i = 0; i < lines.length; i++) {
+		const trimmed = lines[i].trim();
+
+		if (trimmed === 'proxies:') {
+			inProxiesSection = true;
+			result.push(lines[i]);
+			continue;
+		}
+
+		if (inProxiesSection) {
+			// 检测新节点开始（以 "  - {name:" 或 "  - name:" 开头）
+			if (trimmed.startsWith('- {name:') || trimmed.startsWith('- name:')) {
+				// 处理上一个 block
+				if (blockLines.length > 0) {
+					const blockStr = blockLines.join(lineBreak);
+					// 判断是否是 xhttp 误转：network: h2 + reality-opts + h2-opts path
+					const isXhttp = /network:\s*h2/.test(blockStr)
+						&& /reality-opts/.test(blockStr)
+						&& /h2-opts/.test(blockStr)
+						&& /path:/.test(blockStr);
+					if (!isXhttp) {
+						result.push(...blockLines);
+					} else {
+						console.log('[clashFix] 已移除 xhttp 误转节点（network: h2 + reality-opts + h2-opts path）');
+					}
+				}
+				blockLines = [lines[i]];
+				continue;
+			}
+
+			// 段结束判断（非缩进内容且非空行）
+			if (trimmed !== '' && !trimmed.startsWith('-') && !trimmed.startsWith('#') && !lines[i].startsWith('  ') && !lines[i].startsWith('\t')) {
+				// 处理最后一个 block
+				if (blockLines.length > 0) {
+					const blockStr = blockLines.join(lineBreak);
+					const isXhttp = /network:\s*h2/.test(blockStr)
+						&& /reality-opts/.test(blockStr)
+						&& /h2-opts/.test(blockStr)
+						&& /path:/.test(blockStr);
+					if (!isXhttp) {
+						result.push(...blockLines);
+					} else {
+						console.log('[clashFix] 已移除 xhttp 误转节点（network: h2 + reality-opts + h2-opts path）');
+					}
+					blockLines = [];
+				}
+				inProxiesSection = false;
+				result.push(lines[i]);
+				continue;
+			}
+
+			if (blockLines.length > 0) {
+				blockLines.push(lines[i]);
+			} else {
+				result.push(lines[i]);
+			}
+		} else {
+			result.push(lines[i]);
+		}
+	}
+
+	// 处理文件末尾残留 block
+	if (blockLines.length > 0) {
+		const blockStr = blockLines.join(lineBreak);
+		const isXhttp = /network:\s*h2/.test(blockStr)
+			&& /reality-opts/.test(blockStr)
+			&& /h2-opts/.test(blockStr)
+			&& /path:/.test(blockStr);
+		if (!isXhttp) {
+			result.push(...blockLines);
+		} else {
+			console.log('[clashFix] 已移除 xhttp 误转节点（network: h2 + reality-opts + h2-opts path）');
+		}
+	}
+
+	return result.join(lineBreak);
 }
 
 // 解析 subConfig INI 配置文件，提取 ruleset 条目
@@ -1213,6 +1392,3 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 		});
 	}
 }
-
-
-
