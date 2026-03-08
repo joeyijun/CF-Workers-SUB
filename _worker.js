@@ -953,7 +953,8 @@ function singboxFix(jsonStr, rawNodeText) {
 			const pbk = params.get('pbk');
 			const sid = params.get('sid') || '';
 			const sni = params.get('sni') || '';
-			if (pbk) realityMap[hostPort] = { public_key: pbk, short_id: sid, server_name: sni };
+			const fp = params.get('fp') || 'chrome';
+			if (pbk) realityMap[hostPort] = { public_key: pbk, short_id: sid, server_name: sni, fingerprint: fp };
 		} catch (_) {}
 	}
 
@@ -983,7 +984,7 @@ function singboxFix(jsonStr, rawNodeText) {
 	config.outbounds = config.outbounds.map(ob => {
 		const key = `${ob.server}:${ob.server_port}`;
 
-		// 修复1：gRPC+REALITY 丢失 reality 块
+		// 修复1：gRPC+REALITY 丢失 reality 块，同时补 utls（REALITY 需要 TLS 指纹伪装）
 		const isGrpc = ob.transport && ob.transport.type === 'grpc';
 		const hasReality = ob.tls && ob.tls.reality && ob.tls.reality.enabled;
 		if (isGrpc && !hasReality && realityMap[key]) {
@@ -997,7 +998,11 @@ function singboxFix(jsonStr, rawNodeText) {
 			if (ri.server_name && !ob.tls.server_name) {
 				ob.tls.server_name = ri.server_name;
 			}
-			console.log(`[singboxFix] 注入 reality: ${ob.tag}`);
+			// 补 utls：REALITY 节点必须有 utls 做 TLS 指纹伪装
+			if (!ob.tls.utls) {
+				ob.tls.utls = { enabled: true, fingerprint: ri.fingerprint || 'chrome' };
+			}
+			console.log(`[singboxFix] 注入 reality+utls: ${ob.tag}`);
 		}
 
 		// 修复2：xhttp 被错误转成 httpupgrade → 改回 xhttp
