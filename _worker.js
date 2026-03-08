@@ -233,6 +233,13 @@ export default {
 						console.log('rule-providers 转换失败，使用原始 rules: ' + e.message);
 					}
 				}
+				if (订阅格式 == 'singbox') {
+					try {
+						subConverterContent = singboxFix(subConverterContent, result);
+					} catch (e) {
+						console.log('singbox 修复失败: ' + e.message);
+					}
+				}
 				// 只有非浏览器订阅才会返回SUBNAME
 				if (!userAgent.includes('mozilla')) responseHeaders["Content-Disposition"] = `attachment; filename*=utf-8''${encodeURIComponent(FileName)}`;
 				return new Response(subConverterContent, { headers: responseHeaders });
@@ -914,6 +921,112 @@ function fixGroupBlock(lines) {
 
 // 为 network: grpc 但缺少 grpc-opts 的节点（单行格式）补上 grpc-opts
 // Mihomo 处理 gRPC 节点时需要 grpc-opts，缺失会导致连接失败
+// sing-box JSON 后处理：修复 subconverter 的三个已知问题
+// 1. Trojan/VLESS+gRPC+REALITY 丢失 reality 块 → 从原始节点链接重新注入
+// 2. xhttp 被错误转成 httpupgrade → 改回正确的 xhttp 传输
+// 3. gRPC service_name 为 "/" → 改成 ""
+function singboxFix(jsonStr, rawNodeText) {
+	let config;
+	try {
+		config = JSON.parse(jsonStr);
+	} catch (e) {
+		return jsonStr;
+	}
+	if (!config.outbounds || !Array.isArray(config.outbounds)) return jsonStr;
+
+	// 从原始节点链接构建 reality 参数映射：server:port -> {public_key, short_id, sni}
+	const realityMap = {};
+	const lines = (rawNodeText || '').split('\n');
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith('vless://') && !trimmed.startsWith('trojan://')) continue;
+		try {
+			const atIdx = trimmed.indexOf('@');
+			if (atIdx === -1) continue;
+			const hashIdx = trimmed.lastIndexOf('#');
+			const urlPart = hashIdx > -1 ? trimmed.slice(0, hashIdx) : trimmed;
+			const qIdx = urlPart.indexOf('?');
+			if (qIdx === -1) continue;
+			const hostPort = urlPart.slice(atIdx + 1, qIdx);
+			const params = new URLSearchParams(urlPart.slice(qIdx + 1));
+			if (params.get('security') !== 'reality') continue;
+			const pbk = params.get('pbk');
+			const sid = params.get('sid') || '';
+			const sni = params.get('sni') || '';
+			if (pbk) realityMap[hostPort] = { public_key: pbk, short_id: sid, server_name: sni };
+		} catch (_) {}
+	}
+
+	// 从原始节点链接构建 xhttp 路径映射：server:port -> {path, host, mode}
+	const xhttpMap = {};
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith('vless://') && !trimmed.startsWith('trojan://')) continue;
+		try {
+			const atIdx = trimmed.indexOf('@');
+			if (atIdx === -1) continue;
+			const hashIdx = trimmed.lastIndexOf('#');
+			const urlPart = hashIdx > -1 ? trimmed.slice(0, hashIdx) : trimmed;
+			const qIdx = urlPart.indexOf('?');
+			if (qIdx === -1) continue;
+			const hostPort = urlPart.slice(atIdx + 1, qIdx);
+			const params = new URLSearchParams(urlPart.slice(qIdx + 1));
+			if (params.get('type') !== 'xhttp') continue;
+			xhttpMap[hostPort] = {
+				path: params.get('path') || '/',
+				host: params.get('host') || params.get('sni') || '',
+				mode: params.get('mode') || 'auto',
+			};
+		} catch (_) {}
+	}
+
+	config.outbounds = config.outbounds.map(ob => {
+		const key = `${ob.server}:${ob.server_port}`;
+
+		// 修复1：gRPC+REALITY 丢失 reality 块
+		const isGrpc = ob.transport && ob.transport.type === 'grpc';
+		const hasReality = ob.tls && ob.tls.reality && ob.tls.reality.enabled;
+		if (isGrpc && !hasReality && realityMap[key]) {
+			const ri = realityMap[key];
+			ob.tls = ob.tls || { enabled: true };
+			ob.tls.reality = {
+				enabled: true,
+				public_key: ri.public_key,
+				short_id: ri.short_id,
+			};
+			if (ri.server_name && !ob.tls.server_name) {
+				ob.tls.server_name = ri.server_name;
+			}
+			console.log(`[singboxFix] 注入 reality: ${ob.tag}`);
+		}
+
+		// 修复2：xhttp 被错误转成 httpupgrade → 改回 xhttp
+		const isHttpUpgrade = ob.transport && ob.transport.type === 'httpupgrade';
+		if (isHttpUpgrade && xhttpMap[key]) {
+			const xi = xhttpMap[key];
+			ob.transport = {
+				type: 'xhttp',
+				path: xi.path,
+				host: xi.host || undefined,
+				mode: xi.mode !== 'auto' ? xi.mode : undefined,
+			};
+			// 清掉 undefined 字段
+			Object.keys(ob.transport).forEach(k => ob.transport[k] === undefined && delete ob.transport[k]);
+			console.log(`[singboxFix] httpupgrade → xhttp: ${ob.tag}`);
+		}
+
+		// 修复3：gRPC service_name 为 "/" → ""
+		if (ob.transport && ob.transport.type === 'grpc' && ob.transport.service_name === '/') {
+			ob.transport.service_name = '';
+			console.log(`[singboxFix] 修复 grpc service_name: ${ob.tag}`);
+		}
+
+		return ob;
+	});
+
+	return JSON.stringify(config);
+}
+
 function fixMissingGrpcOpts(content) {
 	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
 	const lines = content.split(lineBreak);
