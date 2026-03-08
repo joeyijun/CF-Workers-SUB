@@ -1135,14 +1135,21 @@ function removeXhttpProxies(content) {
 	const flushBlock = () => {
 		if (!blockLines.length) return;
 		const blockStr = blockLines.join(lineBreak);
+		// xhttp 误转为 h2 的节点（Mihomo 不支持 xhttp）
 		const isXhttp = /network:\s*h2/.test(blockStr)
 			&& /reality-opts/.test(blockStr)
 			&& /h2-opts/.test(blockStr)
 			&& /path:/.test(blockStr);
-		if (!isXhttp) {
+
+		// gRPC + REALITY 节点（Mihomo 有已知 bug，timeout，过滤掉）
+		const isGrpcReality = /network:\s*grpc/.test(blockStr)
+			&& /reality-opts/.test(blockStr);
+
+		if (!isXhttp && !isGrpcReality) {
 			result.push(...blockLines);
 		} else {
-			console.log('[removeXhttpProxies] 已移除 xhttp 误转节点');
+			const reason = isXhttp ? 'xhttp 误转节点' : 'gRPC+REALITY（Mihomo 不兼容）';
+			console.log(`[removeXhttpProxies] 已移除 ${reason}: ${blockStr.match(/name:\s*["']?([^"',}\r\n]+)/)?.[1] || ''}`);
 		}
 		blockLines = [];
 	};
