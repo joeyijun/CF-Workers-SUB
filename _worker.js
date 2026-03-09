@@ -921,9 +921,9 @@ function fixGroupBlock(lines) {
 
 // 为 network: grpc 但缺少 grpc-opts 的节点（单行格式）补上 grpc-opts
 // Mihomo 处理 gRPC 节点时需要 grpc-opts，缺失会导致连接失败
-// sing-box JSON 后处理：修复 subconverter 的三个已知问题
+// sing-box JSON 后处理：修复 subconverter 的已知问题
 // 1. Trojan/VLESS+gRPC+REALITY 丢失 reality 块 → 从原始节点链接重新注入
-// 2. xhttp 被错误转成 httpupgrade → 改回正确的 xhttp 传输
+// 2. xhttp 节点（被误转为 httpupgrade）→ 过滤掉（sing-box 不支持 xhttp）
 // 3. gRPC service_name 为 "/" → 改成 ""
 function singboxFix(jsonStr, rawNodeText) {
 	let config;
@@ -981,6 +981,16 @@ function singboxFix(jsonStr, rawNodeText) {
 		} catch (_) {}
 	}
 
+	// 修复2：过滤掉 xhttp 误转的 httpupgrade 节点（sing-box 不支持 xhttp）
+	config.outbounds = config.outbounds.filter(ob => {
+		const key = `${ob.server}:${ob.server_port}`;
+		if (ob.transport && ob.transport.type === 'httpupgrade' && xhttpMap[key]) {
+			console.log(`[singboxFix] 过滤 xhttp 节点: ${ob.tag}`);
+			return false;
+		}
+		return true;
+	});
+
 	config.outbounds = config.outbounds.map(ob => {
 		const key = `${ob.server}:${ob.server_port}`;
 
@@ -1003,21 +1013,6 @@ function singboxFix(jsonStr, rawNodeText) {
 				ob.tls.utls = { enabled: true, fingerprint: ri.fingerprint || 'chrome' };
 			}
 			console.log(`[singboxFix] 注入 reality+utls: ${ob.tag}`);
-		}
-
-		// 修复2：xhttp 被错误转成 httpupgrade → 改回 xhttp
-		const isHttpUpgrade = ob.transport && ob.transport.type === 'httpupgrade';
-		if (isHttpUpgrade && xhttpMap[key]) {
-			const xi = xhttpMap[key];
-			ob.transport = {
-				type: 'xhttp',
-				path: xi.path,
-				host: xi.host || undefined,
-				mode: xi.mode !== 'auto' ? xi.mode : undefined,
-			};
-			// 清掉 undefined 字段
-			Object.keys(ob.transport).forEach(k => ob.transport[k] === undefined && delete ob.transport[k]);
-			console.log(`[singboxFix] httpupgrade → xhttp: ${ob.tag}`);
 		}
 
 		// 修复3：gRPC service_name 为 "/" → ""
