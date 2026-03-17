@@ -1005,10 +1005,10 @@ function singboxInjectNodes(nodesJson, templateJson) {
 			continue;
 		}
 
-		// 国家分组
+		// 国家分组：有匹配节点则注入，没有则用全部节点兜底（避免空数组报错）
 		for (const [flag, pattern] of Object.entries(regionPatterns)) {
-			if (pattern.test(ob.tag) && regionNodes[flag].length > 0) {
-				ob.outbounds = regionNodes[flag];
+			if (pattern.test(ob.tag)) {
+				ob.outbounds = regionNodes[flag].length > 0 ? regionNodes[flag] : allNodeTags;
 				break;
 			}
 		}
