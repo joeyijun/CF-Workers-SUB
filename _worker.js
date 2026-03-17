@@ -18,6 +18,7 @@ https://cfxr.eu.org/getSub
 let urls = [];
 let subConverter = "SUBAPI.cmliussss.net"; //在线订阅转换后端，目前使用CM的订阅转换功能。支持自建psub 可自行搭建https://github.com/bulianglin/psub
 let subConfig = "https://raw.githubusercontent.com/cmliu/ACL4SSR/main/Clash/config/ACL4SSR_Online_MultiCountry.ini"; //订阅配置文件
+let sbConfig = ""; // sing-box JSON 模板地址
 let subProtocol = 'https';
 
 export default {
@@ -38,6 +39,7 @@ export default {
 			subConverter = subConverter.split("//")[1] || subConverter;
 		}
 		subConfig = env.SUBCONFIG || subConfig;
+		sbConfig = env.SBCONFIG || sbConfig;
 		FileName = env.SUBNAME || FileName;
 
 		const currentDate = new Date();
@@ -94,6 +96,7 @@ export default {
 			let 订阅格式 = 'base64';
 			if (!(userAgent.includes('null') || isSubConverterRequest || userAgent.includes('nekobox') || userAgent.includes(('CF-Workers-SUB').toLowerCase()))) {
 				if (userAgent.includes('sing-box') || userAgent.includes('singbox') || url.searchParams.has('sb') || url.searchParams.has('singbox')) {
+					if (url.searchParams.has('sbconfig')) sbConfig = decodeURIComponent(url.searchParams.get('sbconfig'));
 					订阅格式 = 'singbox';
 				} else if (userAgent.includes('surge') || url.searchParams.has('surge')) {
 					订阅格式 = 'surge';
@@ -238,6 +241,18 @@ export default {
 						subConverterContent = singboxFix(subConverterContent, result);
 					} catch (e) {
 						console.log('singbox 修复失败: ' + e.message);
+					}
+					// 如果提供了 sing-box JSON 模板，将节点注入模板
+					if (sbConfig) {
+						try {
+							const tmplResp = await fetch(sbConfig);
+							if (tmplResp.ok) {
+								const tmplText = await tmplResp.text();
+								subConverterContent = singboxInjectNodes(subConverterContent, tmplText);
+							}
+						} catch (e) {
+							console.log('singbox 模板注入失败: ' + e.message);
+						}
 					}
 				}
 				// 只有非浏览器订阅才会返回SUBNAME
@@ -925,6 +940,90 @@ function fixGroupBlock(lines) {
 // 1. Trojan/VLESS+gRPC+REALITY 丢失 reality 块 → 从原始节点链接重新注入
 // 2. xhttp 节点（被误转为 httpupgrade）→ 过滤掉（sing-box 不支持 xhttp）
 // 3. gRPC service_name 为 "/" → 改成 ""
+// sing-box 节点注入：把 subconverter 输出的节点列表注入到 JSON 模板的分组 outbounds 里
+function singboxInjectNodes(nodesJson, templateJson) {
+	let nodes, template;
+	try {
+		nodes = JSON.parse(nodesJson);
+		template = JSON.parse(templateJson);
+	} catch (e) {
+		console.log('[singboxInjectNodes] JSON 解析失败: ' + e.message);
+		return nodesJson;
+	}
+
+	// 从节点列表里提取真实代理节点（排除 selector/urltest/direct/block/dns 等功能性 outbound）
+	const proxyTypes = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'ss', 'hysteria', 'hysteria2', 'tuic', 'wireguard']);
+	const proxyNodes = (nodes.outbounds || []).filter(ob => proxyTypes.has(ob.type));
+
+	if (proxyNodes.length === 0) {
+		console.log('[singboxInjectNodes] 没有找到代理节点');
+		return nodesJson;
+	}
+
+	// 国家/地区关键词映射
+	const regionPatterns = {
+		'🇭🇰': /港|🇭🇰|HK|hk|Hong Kong|HongKong|hongkong/,
+		'🇯🇵': /日本|川日|东京|大阪|泉日|埼玉|沪日|深日|🇯🇵|JP|Japan/,
+		'🇸🇬': /新加坡|坡|狮城|🇸🇬|SG|Singapore/,
+		'🇺🇲': /美|🇺🇸|波特兰|达拉斯|俄勒冈|凤凰城|费利蒙|硅谷|拉斯维加斯|洛杉矶|圣何塞|圣克拉拉|西雅图|芝加哥|US|United States/,
+	};
+
+	// 按地区分类节点
+	const regionNodes = {};
+	for (const flag of Object.keys(regionPatterns)) regionNodes[flag] = [];
+	const allNodeTags = proxyNodes.map(n => n.tag);
+
+	for (const node of proxyNodes) {
+		for (const [flag, pattern] of Object.entries(regionPatterns)) {
+			if (pattern.test(node.tag)) {
+				regionNodes[flag].push(node.tag);
+				break;
+			}
+		}
+	}
+
+	// 把节点加入模板的 outbounds
+	// 先把代理节点插入模板（放在 DIRECT 之前）
+	const directIdx = template.outbounds.findIndex(ob => ob.type === 'direct');
+	if (directIdx > -1) {
+		template.outbounds.splice(directIdx, 0, ...proxyNodes);
+	} else {
+		template.outbounds.push(...proxyNodes);
+	}
+
+	// 遍历模板 outbounds，按 tag 名称注入节点列表
+	for (const ob of template.outbounds) {
+		if (!Array.isArray(ob.outbounds)) continue;
+
+		// 全部节点的分组（自动选择、负载均衡）
+		if (ob.type === 'urltest' && ob.tag === '♻️ 自动选择') {
+			ob.outbounds = allNodeTags;
+			continue;
+		}
+		if (ob.type === 'loadbalance' && ob.tag === '⚖️ 负载均衡') {
+			ob.outbounds = allNodeTags;
+			continue;
+		}
+
+		// 国家分组
+		for (const [flag, pattern] of Object.entries(regionPatterns)) {
+			if (pattern.test(ob.tag) && regionNodes[flag].length > 0) {
+				ob.outbounds = regionNodes[flag];
+				break;
+			}
+		}
+
+		// 主选择器：把原有的功能性 outbound 保留，在最前面插入地区分组
+		if (ob.type === 'selector' && ob.tag === '🚀 节点选择') {
+			// 保留原有非节点项（自动选择、负载均衡、地区组、DIRECT 等）
+			// 已经在模板里定义好了，不需要改动
+		}
+	}
+
+	console.log(`[singboxInjectNodes] 注入 ${proxyNodes.length} 个节点到模板`);
+	return JSON.stringify(template);
+}
+
 function singboxFix(jsonStr, rawNodeText) {
 	let config;
 	try {
@@ -1541,6 +1640,9 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 					singbox订阅地址:<br>
 					<a href="javascript:void(0)" onclick="copyToClipboard('https://${url.hostname}/${mytoken}?sb','qrcode_3')" style="color:blue;text-decoration:underline;cursor:pointer;">https://${url.hostname}/${mytoken}?sb</a><br>
 					<div id="qrcode_3" style="margin: 10px 10px 10px 10px;"></div>
+					${sbConfig ? `singbox订阅地址（含模板）:<br>
+					<a href="javascript:void(0)" onclick="copyToClipboard('https://${url.hostname}/${mytoken}?sb&sbconfig=${encodeURIComponent(sbConfig)}','qrcode_3t')" style="color:blue;text-decoration:underline;cursor:pointer;">https://${url.hostname}/${mytoken}?sb&sbconfig=${encodeURIComponent(sbConfig)}</a><br>
+					<div id="qrcode_3t" style="margin: 10px 10px 10px 10px;"></div>` : ''}
 					surge订阅地址:<br>
 					<a href="javascript:void(0)" onclick="copyToClipboard('https://${url.hostname}/${mytoken}?surge','qrcode_4')" style="color:blue;text-decoration:underline;cursor:pointer;">https://${url.hostname}/${mytoken}?surge</a><br>
 					<div id="qrcode_4" style="margin: 10px 10px 10px 10px;"></div>
@@ -1578,6 +1680,7 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 					---------------------------------------------------------------<br>
 					SUBAPI（订阅转换后端）: <strong>${subProtocol}://${subConverter}</strong><br>
 					SUBCONFIG（订阅转换配置文件）: <strong>${subConfig}</strong><br>
+					SBCONFIG（sing-box JSON模板）: <strong>${sbConfig || '未设置'}</strong><br>
 					---------------------------------------------------------------<br>
 					################################################################<br>
 					${FileName} 汇聚订阅编辑: 
