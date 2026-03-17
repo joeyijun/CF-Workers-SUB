@@ -1000,7 +1000,7 @@ function singboxInjectNodes(nodesJson, templateJson) {
 			ob.outbounds = allNodeTags;
 			continue;
 		}
-		if (ob.type === 'loadbalance' && ob.tag === '⚖️ 负载均衡') {
+		if (ob.type === 'urltest' && ob.tag === '⚖️ 负载均衡') {
 			ob.outbounds = allNodeTags;
 			continue;
 		}
