@@ -948,6 +948,7 @@ function fixGroupBlock(lines) {
 // 3. gRPC service_name 为 "/" → 改成 ""
 // sing-box 节点注入：把 subconverter 输出的节点列表注入到 JSON 模板的分组 outbounds 里
 // sing-box 节点名 emoji 恢复：从原始节点链接提取 emoji 映射，恢复被 subconverter 去掉的 emoji
+// 策略：优先用 server:port 匹配（处理同名节点），fallback 用裸名匹配
 function singboxRestoreEmoji(jsonStr, rawNodeText) {
 	let config;
 	try {
@@ -957,34 +958,77 @@ function singboxRestoreEmoji(jsonStr, rawNodeText) {
 	}
 	if (!config.outbounds) return jsonStr;
 
-	// 从原始链接构建 裸名→带emoji名 的映射
-	// 原始链接 # 后面是 URL 编码的节点名，如 %F0%9F%87%AF%F0%9F%87%B5%20wanxy
-	const emojiMap = {};
 	const lines = (rawNodeText || '').split('\n');
+
+	// 构建 server:port → fullName 的映射（处理同名节点）
+	const portMap = {};
+	// 构建 裸名 → fullName 的映射（处理不同名节点的 fallback）
+	const nameMap = {};
+
 	for (const line of lines) {
 		const trimmed = line.trim();
+		if (!trimmed.startsWith('vless://') && !trimmed.startsWith('trojan://') &&
+		    !trimmed.startsWith('vmess://') && !trimmed.startsWith('ss://')) continue;
 		const hashIdx = trimmed.lastIndexOf('#');
 		if (hashIdx === -1) continue;
 		try {
 			const fullName = decodeURIComponent(trimmed.slice(hashIdx + 1)).trim();
-			// 提取裸名（去掉 emoji 和空格前缀）
 			const bareName = fullName.replace(/^[\u{1F1E0}-\u{1F1FF}\u{1F300}-\u{1F9FF}\s]+/u, '').trim();
-			if (bareName && fullName !== bareName) {
-				emojiMap[bareName] = fullName;
+			if (!bareName || fullName === bareName) continue;
+
+			// 提取 server:port
+			const atIdx = trimmed.indexOf('@');
+			const qIdx = trimmed.indexOf('?');
+			if (atIdx > -1) {
+				const hostPort = trimmed.slice(atIdx + 1, qIdx > -1 ? qIdx : hashIdx);
+				if (!portMap[hostPort]) portMap[hostPort] = fullName;
 			}
+			// 裸名映射（只存第一个，同名后续会被序号区分）
+			if (!nameMap[bareName]) nameMap[bareName] = fullName;
 		} catch (_) {}
 	}
 
-	if (Object.keys(emojiMap).length === 0) return jsonStr;
+	// subconverter 给同名节点加序号的规律：第一个保持原名，后续加 " 2"、" 3"...
+	// 按 server:port 重建序号映射
+	// 统计每个裸名出现几次，建立 "裸名 N" → fullName 的映射
+	const bareCount = {};
+	const seqMap = {}; // "wanxy 2" → "🇯🇵 wanxy"（带旗帜）
 
-	// 替换 outbounds 里匹配的节点名
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith('vless://') && !trimmed.startsWith('trojan://') &&
+		    !trimmed.startsWith('vmess://') && !trimmed.startsWith('ss://')) continue;
+		const hashIdx = trimmed.lastIndexOf('#');
+		if (hashIdx === -1) continue;
+		try {
+			const fullName = decodeURIComponent(trimmed.slice(hashIdx + 1)).trim();
+			const bareName = fullName.replace(/^[\u{1F1E0}-\u{1F1FF}\u{1F300}-\u{1F9FF}\s]+/u, '').trim();
+			if (!bareName || fullName === bareName) continue;
+
+			bareCount[bareName] = (bareCount[bareName] || 0) + 1;
+			const seq = bareCount[bareName];
+			const seqKey = seq === 1 ? bareName : `${bareName} ${seq}`;
+			seqMap[seqKey] = fullName;
+		} catch (_) {}
+	}
+
+	// 替换 outbounds 里的节点名
 	let restored = 0;
 	config.outbounds = config.outbounds.map(ob => {
 		if (!ob.tag) return ob;
-		const mapped = emojiMap[ob.tag];
-		if (mapped) {
-			ob.tag = mapped;
+		const key = `${ob.server}:${ob.server_port}`;
+
+		// 优先用 server:port 精确匹配
+		if (portMap[key]) {
+			ob.tag = portMap[key];
 			restored++;
+			return ob;
+		}
+		// fallback：用序号映射（处理同名节点）
+		if (seqMap[ob.tag]) {
+			ob.tag = seqMap[ob.tag];
+			restored++;
+			return ob;
 		}
 		return ob;
 	});
