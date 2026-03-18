@@ -644,67 +644,50 @@ function restoreEmoji(content, nodeText) {
 
 // 根据代理名称中的 emoji 国旗，重新分配节点到对应的国家代理组
 function fixProxyGroups(content) {
+	// 思路：subconverter 已经按 ini 正则把节点分好组了，但节点名 emoji 被去掉了。
+	// 我们只需要：把 proxies 段里的带 emoji 节点名建立映射，
+	// 然后把 proxy-groups 里的裸名引用替换成带 emoji 的正确名字。
+	// 完全不重新分配节点，尊重 subconverter 的分组结果。
+
 	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
 	const lines = content.split(lineBreak);
 	const TOP = /^[a-zA-Z][a-zA-Z0-9_-]*:/;
 
-	// 第1步：只扫顶级 proxies: 段，提取节点名
-	const allProxyNames = [];
+	// 第1步：从 proxies 段提取所有节点名，建立 裸名→带emoji名 的映射
+	// 带 emoji 的节点名是权威名（由 restoreEmoji 恢复），裸名是 subconverter 去掉 emoji 后的名字
+	const emojiNameMap = {}; // 裸名 → 带emoji名
+	const allEmojiNames = new Set(); // 所有带emoji的节点名
 	let section = '';
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i];
-		if (TOP.test(line)) {
-			section = line.split(':')[0].trim();
-			continue;
-		}
-		if (section === 'proxies') {
-			const nameMatch = line.match(/name:\s*"?([^",}\r\n]+)"?\s*[,}]/);
-			if (nameMatch) allProxyNames.push(nameMatch[1].trim());
+	for (const line of lines) {
+		if (TOP.test(line)) { section = line.split(':')[0].trim(); continue; }
+		if (section !== 'proxies') continue;
+		const nameMatch = line.match(/name:\s*"?([^",}\r\n]+)"?\s*[,}]/);
+		if (!nameMatch) continue;
+		const name = nameMatch[1].trim();
+		// 带 emoji 旗帜的节点名
+		if (/[\u{1F1E0}-\u{1F1FF}]/u.test(name)) {
+			allEmojiNames.add(name);
+			// 去掉 emoji 前缀得到裸名
+			const bare = name.replace(/^[\u{1F1E0}-\u{1F1FF}\u{1F300}-\u{1F9FF}\s]+/u, '').trim();
+			if (bare && bare !== name) emojiNameMap[bare] = name;
 		}
 	}
 
-	// 第2步：按关键词正则分组（支持旗帜不一致的情况，如组名 🇺🇲 但节点名 🇺🇸）
-	const regionPatterns = {
-		'HK': /港|🇭🇰|HK|hk|Hong Kong|HongKong|hongkong/,
-		'JP': /日本|川日|东京|大阪|泉日|埼玉|沪日|深日|🇯🇵|JP|Japan/,
-		'SG': /新加坡|坡|狮城|🇸🇬|SG|Singapore/,
-		'US': /美|🇺🇸|波特兰|达拉斯|俄勒冈|凤凰城|费利蒙|硅谷|拉斯维加斯|洛杉矶|圣何塞|圣克拉拉|西雅图|芝加哥|San Jose|San jose|Portland|Dallas|Oregon|Phoenix|Fremont|Silicon Valley|Los Angeles|Seattle|Chicago|US|United States/,
-	};
-	const regionGroupPatterns = {
-		'HK': /港|🇭🇰|香港/,
-		'JP': /日本|🇯🇵/,
-		'SG': /新加坡|狮城|🇸🇬/,
-		'US': /美国|🇺🇲|🇺🇸/,
-	};
-	// 节点按地区分类
-	const regionToProxies = { HK: [], JP: [], SG: [], US: [] };
-	for (const name of allProxyNames) {
-		for (const [region, pattern] of Object.entries(regionPatterns)) {
-			if (pattern.test(name)) {
-				regionToProxies[region].push(name);
-				break;
-			}
-		}
-	}
-	if (Object.values(regionToProxies).every(arr => arr.length === 0)) return content;
+	// 如果没有 emoji 节点名，说明 emoji 未恢复，直接返回不处理
+	if (allEmojiNames.size === 0) return content;
 
-	// 第3步：逐行处理，仅在 proxy-groups 段内、且当前组是国家组时替换其 proxies 列表
+	// 第2步：逐行处理 proxy-groups，把组内的节点引用替换成带 emoji 的正确名字
 	const result = [];
 	let topSection = '';
-	let currentGroupRegion = null;
-	let inGroupProxiesList = false;
+	let inGroupProxies = false;
 	let proxiesIndent = '';
-	let addedNewProxies = false;
 
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i];
+	for (const line of lines) {
 		const trimmed = line.trim();
 
 		if (TOP.test(line)) {
 			topSection = line.split(':')[0].trim();
-			currentGroupFlag = null;
-			inGroupProxiesList = false;
-			addedNewProxies = false;
+			inGroupProxies = false;
 			result.push(line);
 			continue;
 		}
@@ -714,62 +697,35 @@ function fixProxyGroups(content) {
 			continue;
 		}
 
-		// 检测新 group 开始
+		// 新 group 开始，重置状态
 		if (/^\s+- name:/.test(line) || /^\s+- \{name:/.test(line)) {
-			inGroupProxiesList = false;
-			addedNewProxies = false;
-			currentGroupRegion = null;
-			// 用关键词正则判断当前组是哪个地区组
-			const nameMatch = line.match(/name:\s*"?([^"\r\n,}]+)/);
-			if (nameMatch) {
-				const groupName = nameMatch[1].trim();
-				for (const [region, pattern] of Object.entries(regionGroupPatterns)) {
-					if (pattern.test(groupName) && regionToProxies[region].length > 0) {
-						currentGroupRegion = region;
-						break;
-					}
-				}
-			}
+			inGroupProxies = false;
 			result.push(line);
 			continue;
 		}
 
-		// 检测国家组内有缩进的 proxies: 子段（排除顶级 proxies:）
-		if (currentGroupRegion && trimmed === 'proxies:' && line !== 'proxies:' && line !== 'proxies:\r') {
-			inGroupProxiesList = true;
+		// 进入 proxies: 子段
+		if (trimmed === 'proxies:' && line !== 'proxies:' && line !== 'proxies:\r') {
+			inGroupProxies = true;
 			proxiesIndent = line.match(/^(\s*)/)[1];
 			result.push(line);
-			for (const proxyName of regionToProxies[currentGroupRegion]) {
-				result.push(`${proxiesIndent}  - ${proxyName}`);
-			}
-			addedNewProxies = true;
 			continue;
 		}
 
-		// 跳过国家组的旧代理列表行
-		if (inGroupProxiesList && addedNewProxies) {
+		// 在 proxies 列表里，把裸名替换成带 emoji 的名字
+		if (inGroupProxies) {
 			const lineIndent = line.match(/^(\s*)/)[1].length;
-			const expectedIndent = proxiesIndent.length + 2;
-			if (lineIndent >= expectedIndent && trimmed.startsWith('-')) {
+			if (lineIndent >= proxiesIndent.length + 2 && trimmed.startsWith('- ')) {
+				const refName = trimmed.slice(2).trim();
+				// 如果是裸名且有对应的带 emoji 名，替换
+				if (emojiNameMap[refName]) {
+					result.push(line.replace(refName, emojiNameMap[refName]));
+				} else {
+					result.push(line);
+				}
 				continue;
 			} else {
-				inGroupProxiesList = false;
-				addedNewProxies = false;
-				if (/^\s+- name:/.test(line) || /^\s+- \{name:/.test(line)) {
-					currentGroupRegion = null;
-					const nameMatch2 = line.match(/name:\s*"?([^"\r\n,}]+)/);
-					if (nameMatch2) {
-						const groupName2 = nameMatch2[1].trim();
-						for (const [region, pattern] of Object.entries(regionGroupPatterns)) {
-							if (pattern.test(groupName2) && regionToProxies[region].length > 0) {
-								currentGroupRegion = region;
-								break;
-							}
-						}
-					}
-				}
-				result.push(line);
-				continue;
+				inGroupProxies = false;
 			}
 		}
 
@@ -1064,6 +1020,11 @@ function singboxRestoreEmoji(jsonStr, rawNodeText) {
 }
 
 function singboxInjectNodes(nodesJson, templateJson) {
+	// 思路：完全从模板读取分组定义，不硬编码地区。
+	// 对模板里每个含 outbounds 的分组：
+	// - 地区组（tag 含旗帜 emoji）→ 用节点 tag 里的旗帜精确匹配后注入
+	// - urltest/loadbalance 无旗帜 → 注入所有节点
+	// - selector 无旗帜 → 保持模板定义不变
 	let nodes, template;
 	try {
 		nodes = JSON.parse(nodesJson);
@@ -1073,39 +1034,33 @@ function singboxInjectNodes(nodesJson, templateJson) {
 		return nodesJson;
 	}
 
-	// 从节点列表里提取真实代理节点（排除 selector/urltest/direct/block/dns 等功能性 outbound）
+	// 提取真实代理节点
 	const proxyTypes = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'ss', 'hysteria', 'hysteria2', 'tuic', 'wireguard']);
 	const proxyNodes = (nodes.outbounds || []).filter(ob => proxyTypes.has(ob.type));
-
 	if (proxyNodes.length === 0) {
 		console.log('[singboxInjectNodes] 没有找到代理节点');
 		return nodesJson;
 	}
 
-	// 国家/地区关键词映射
-	const regionPatterns = {
-		'🇭🇰': /港|🇭🇰|HK|hk|Hong Kong|HongKong|hongkong/,
-		'🇯🇵': /日本|川日|东京|大阪|泉日|埼玉|沪日|深日|🇯🇵|JP|Japan/,
-		'🇸🇬': /新加坡|坡|狮城|🇸🇬|SG|Singapore/,
-		'🇺🇲': /美|🇺🇸|波特兰|达拉斯|俄勒冈|凤凰城|费利蒙|硅谷|拉斯维加斯|洛杉矶|圣何塞|圣克拉拉|西雅图|芝加哥|San Jose|San jose|Portland|Dallas|Oregon|Phoenix|Fremont|Silicon Valley|Los Angeles|Seattle|Chicago|US|United States/,
-	};
-
-	// 按地区分类节点
-	const regionNodes = {};
-	for (const flag of Object.keys(regionPatterns)) regionNodes[flag] = [];
 	const allNodeTags = proxyNodes.map(n => n.tag);
 
+	// 从 tag 里提取旗帜（区域指示符对 U+1F1E0-U+1F1FF）
+	const getFlagFromTag = (tag) => {
+		const m = tag.match(/^([\u{1F1E0}-\u{1F1FF}]{2})/u);
+		return m ? m[1] : null;
+	};
+
+	// 按旗帜分类节点 tag
+	const flagToTags = {};
 	for (const node of proxyNodes) {
-		for (const [flag, pattern] of Object.entries(regionPatterns)) {
-			if (pattern.test(node.tag)) {
-				regionNodes[flag].push(node.tag);
-				break;
-			}
+		const flag = getFlagFromTag(node.tag);
+		if (flag) {
+			if (!flagToTags[flag]) flagToTags[flag] = [];
+			flagToTags[flag].push(node.tag);
 		}
 	}
 
-	// 把节点加入模板的 outbounds
-	// 先把代理节点插入模板（放在 DIRECT 之前）
+	// 把代理节点插入模板（放在第一个 direct 之前）
 	const directIdx = template.outbounds.findIndex(ob => ob.type === 'direct');
 	if (directIdx > -1) {
 		template.outbounds.splice(directIdx, 0, ...proxyNodes);
@@ -1113,36 +1068,26 @@ function singboxInjectNodes(nodesJson, templateJson) {
 		template.outbounds.push(...proxyNodes);
 	}
 
-	// 遍历模板 outbounds，按 tag 名称注入节点列表
+	// 遍历模板 outbounds，智能注入节点
 	for (const ob of template.outbounds) {
 		if (!Array.isArray(ob.outbounds)) continue;
 
-		// 全部节点的分组（自动选择、负载均衡）
-		if (ob.type === 'urltest' && ob.tag === '♻️ 自动选择') {
-			ob.outbounds = allNodeTags;
-			continue;
-		}
-		if (ob.type === 'urltest' && ob.tag === '⚖️ 负载均衡') {
-			ob.outbounds = allNodeTags;
-			continue;
-		}
+		const groupFlag = getFlagFromTag(ob.tag);
 
-		// 国家分组：有匹配节点则注入，没有则用全部节点兜底（避免空数组报错）
-		for (const [flag, pattern] of Object.entries(regionPatterns)) {
-			if (pattern.test(ob.tag)) {
-				ob.outbounds = regionNodes[flag].length > 0 ? regionNodes[flag] : allNodeTags;
-				break;
-			}
+		if (groupFlag && flagToTags[groupFlag]) {
+			// 地区组有匹配节点 → 精确注入
+			ob.outbounds = flagToTags[groupFlag];
+		} else if (groupFlag && !flagToTags[groupFlag]) {
+			// 地区组无匹配节点 → 全节点兜底（避免空数组报错）
+			ob.outbounds = allNodeTags;
+		} else if (ob.type === 'urltest' || ob.type === 'loadbalance') {
+			// 无旗帜的 urltest/loadbalance（自动选择、负载均衡）→ 全节点
+			ob.outbounds = allNodeTags;
 		}
-
-		// 主选择器：把原有的功能性 outbound 保留，在最前面插入地区分组
-		if (ob.type === 'selector' && ob.tag === '🚀 节点选择') {
-			// 保留原有非节点项（自动选择、负载均衡、地区组、DIRECT 等）
-			// 已经在模板里定义好了，不需要改动
-		}
+		// selector 无旗帜（节点选择、Onedrive 等）→ 保持模板定义不变
 	}
 
-	console.log(`[singboxInjectNodes] 注入 ${proxyNodes.length} 个节点到模板`);
+	console.log(`[singboxInjectNodes] 注入 ${proxyNodes.length} 个节点，旗帜分组: ${JSON.stringify(Object.keys(flagToTags))}`);
 	return JSON.stringify(template);
 }
 
