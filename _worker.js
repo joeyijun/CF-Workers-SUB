@@ -243,6 +243,12 @@ export default {
 						console.log('singbox 修复失败: ' + e.message);
 					}
 					// 如果提供了 sing-box JSON 模板，将节点注入模板
+					// 恢复 sing-box 节点名中被 subconverter 去掉的 emoji
+					try {
+						subConverterContent = singboxRestoreEmoji(subConverterContent, result);
+					} catch (e) {
+						console.log('singbox emoji 恢复失败: ' + e.message);
+					}
 					if (sbConfig) {
 						try {
 							const tmplResp = await fetch(sbConfig);
@@ -941,6 +947,52 @@ function fixGroupBlock(lines) {
 // 2. xhttp 节点（被误转为 httpupgrade）→ 过滤掉（sing-box 不支持 xhttp）
 // 3. gRPC service_name 为 "/" → 改成 ""
 // sing-box 节点注入：把 subconverter 输出的节点列表注入到 JSON 模板的分组 outbounds 里
+// sing-box 节点名 emoji 恢复：从原始节点链接提取 emoji 映射，恢复被 subconverter 去掉的 emoji
+function singboxRestoreEmoji(jsonStr, rawNodeText) {
+	let config;
+	try {
+		config = JSON.parse(jsonStr);
+	} catch (e) {
+		return jsonStr;
+	}
+	if (!config.outbounds) return jsonStr;
+
+	// 从原始链接构建 裸名→带emoji名 的映射
+	// 原始链接 # 后面是 URL 编码的节点名，如 %F0%9F%87%AF%F0%9F%87%B5%20wanxy
+	const emojiMap = {};
+	const lines = (rawNodeText || '').split('\n');
+	for (const line of lines) {
+		const trimmed = line.trim();
+		const hashIdx = trimmed.lastIndexOf('#');
+		if (hashIdx === -1) continue;
+		try {
+			const fullName = decodeURIComponent(trimmed.slice(hashIdx + 1)).trim();
+			// 提取裸名（去掉 emoji 和空格前缀）
+			const bareName = fullName.replace(/^[\u{1F1E0}-\u{1F1FF}\u{1F300}-\u{1F9FF}\s]+/u, '').trim();
+			if (bareName && fullName !== bareName) {
+				emojiMap[bareName] = fullName;
+			}
+		} catch (_) {}
+	}
+
+	if (Object.keys(emojiMap).length === 0) return jsonStr;
+
+	// 替换 outbounds 里匹配的节点名
+	let restored = 0;
+	config.outbounds = config.outbounds.map(ob => {
+		if (!ob.tag) return ob;
+		const mapped = emojiMap[ob.tag];
+		if (mapped) {
+			ob.tag = mapped;
+			restored++;
+		}
+		return ob;
+	});
+
+	if (restored > 0) console.log(`[singboxRestoreEmoji] 恢复 ${restored} 个节点名 emoji`);
+	return JSON.stringify(config);
+}
+
 function singboxInjectNodes(nodesJson, templateJson) {
 	let nodes, template;
 	try {
