@@ -604,57 +604,84 @@ function extractEmojiMap(nodeText) {
 }
 
 // 恢复 Clash 配置中被 subconverter 去掉的 emoji 国旗
+// 恢复 Clash 配置中被 subconverter 去掉的 emoji 国旗
+// 策略：和 singboxRestoreEmoji 一样，用 server:port 精确匹配，不依赖节点名字符串
 function restoreEmoji(content, nodeText) {
-	const emojiMap = extractEmojiMap(nodeText);
-	if (Object.keys(emojiMap).length === 0) return content;
-
 	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
+	const lines = nodeText.split('\n');
 
-	// 按 baseName 长度降序排列，避免短名称部分匹配长名称
-	const entries = Object.entries(emojiMap).sort((a, b) => b[0].length - a[0].length);
+	// 第1步：从原始链接构建 server:port → fullName 映射
+	const portToFullName = {};
+	// 同时构建 裸名(去emoji) → fullName 映射作为 fallback
+	const bareToFullName = {};
 
-	for (const [baseName, emoji] of entries) {
-		const withEmoji = `${emoji} ${baseName}`;
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith('vless://') && !trimmed.startsWith('trojan://') &&
+		    !trimmed.startsWith('vmess://') && !trimmed.startsWith('ss://')) continue;
+		const hashIdx = trimmed.lastIndexOf('#');
+		if (hashIdx === -1) continue;
+		try {
+			const fullName = decodeURIComponent(trimmed.slice(hashIdx + 1)).trim();
+			// 只处理有 emoji 旗帜的节点名
+			if (!/[\u{1F1E0}-\u{1F1FF}]/u.test(fullName)) continue;
 
-		// 如果配置中已经有这个 emoji+名称，跳过
-		if (content.includes(withEmoji)) continue;
-		// 如果 baseName 不在配置中，跳过
-		if (!content.includes(baseName)) continue;
-
-		// 替换代理定义中的 name 字段: name: baseName,
-		content = content.replaceAll(`name: ${baseName},`, `name: ${withEmoji},`);
-		// 替换代理列表引用: - baseName (行尾)
-		content = content.replaceAll(`- ${baseName}${lineBreak}`, `- ${withEmoji}${lineBreak}`);
-		// 处理文件末尾没有换行符的情况
-		if (content.endsWith(`- ${baseName}`)) content = content.slice(0, -baseName.length - 2) + `- ${withEmoji}`;
-
-		// 处理编号副本，兼容两种格式：
-		// - "baseName 2"（有空格，subconverter 标准格式）
-		// - "baseName2"（无空格，subconverter 有时会用这种格式）
-		// - "baseName1"（第一个节点加了1，subconverter 有时会这样编号）
-		// 注意：如果 baseName 本身已以数字结尾（如 wanxy1），跳过编号处理避免产生 wanxy11 等错误 key
-		if (/\d$/.test(baseName)) continue;
-		for (let i = 1; i <= 50; i++) {
-			// 有空格版本（从2开始）
-			if (i >= 2) {
-				const numbered = `${baseName} ${i}`;
-				const numberedWithEmoji = `${emoji} ${numbered}`;
-				if (!content.includes(numberedWithEmoji) && content.includes(numbered)) {
-					content = content.replaceAll(`name: ${numbered},`, `name: ${numberedWithEmoji},`);
-					content = content.replaceAll(`- ${numbered}${lineBreak}`, `- ${numberedWithEmoji}${lineBreak}`);
-					if (content.endsWith(`- ${numbered}`)) content = content.slice(0, -numbered.length - 2) + `- ${numberedWithEmoji}`;
-				}
+			// 提取 server:port
+			const atIdx = trimmed.indexOf('@');
+			const qIdx = trimmed.indexOf('?');
+			if (atIdx > -1) {
+				const hostPort = trimmed.slice(atIdx + 1, qIdx > -1 ? qIdx : hashIdx);
+				if (!portToFullName[hostPort]) portToFullName[hostPort] = fullName;
 			}
-			// 无空格版本（baseName1, baseName2, ...）
-			const numberedNoSpace = `${baseName}${i}`;
-			const numberedNoSpaceWithEmoji = `${emoji} ${numberedNoSpace}`;
-			if (!content.includes(numberedNoSpaceWithEmoji) && content.includes(numberedNoSpace)) {
-				content = content.replaceAll(`name: ${numberedNoSpace},`, `name: ${numberedNoSpaceWithEmoji},`);
-				content = content.replaceAll(`- ${numberedNoSpace}${lineBreak}`, `- ${numberedNoSpaceWithEmoji}${lineBreak}`);
-				if (content.endsWith(`- ${numberedNoSpace}`)) content = content.slice(0, -numberedNoSpace.length - 2) + `- ${numberedNoSpaceWithEmoji}`;
+			// 裸名 fallback
+			const bare = fullName.replace(/^[\u{1F1E0}-\u{1F1FF}\u{1F300}-\u{1F9FF}\s]+/u, '').trim();
+			if (bare && !bareToFullName[bare]) bareToFullName[bare] = fullName;
+		} catch (_) {}
+	}
+
+	if (Object.keys(portToFullName).length === 0 && Object.keys(bareToFullName).length === 0) return content;
+
+	// 第2步：解析 Clash YAML 的 proxies 段，建立 subconverter输出名 → fullName 映射
+	// subconverter 会去掉 emoji，我们需要知道每个裸名对应哪个 fullName
+	// 通过 server:port 匹配来确定
+	const TOP = /^[a-zA-Z][a-zA-Z0-9_-]*:/;
+	const contentLines = content.split(lineBreak);
+	const nameToFullName = {}; // subconverter裸名 → fullName
+
+	let section = '';
+	for (const line of contentLines) {
+		if (TOP.test(line)) { section = line.split(':')[0].trim(); continue; }
+		if (section !== 'proxies') continue;
+
+		// 单行格式: - {name: xxx, server: yyy, port: zzz, ...}
+		const inlineMatch = line.match(/name:\s*"?([^",}\r\n]+)"?.*?server:\s*"?([^",}\r\n]+)"?.*?port:\s*(\d+)/);
+		if (inlineMatch) {
+			const [, name, server, port] = inlineMatch;
+			const key = `${server.trim()}:${port.trim()}`;
+			const fullName = portToFullName[key] || bareToFullName[name.trim()];
+			if (fullName && fullName !== name.trim()) {
+				nameToFullName[name.trim()] = fullName;
 			}
-			// 两种格式都不存在则停止
-			if (i >= 2 && !content.includes(`${baseName} ${i}`) && !content.includes(`${baseName}${i}`)) break;
+		}
+	}
+
+	if (Object.keys(nameToFullName).length === 0) return content;
+
+	// 第3步：按名称长度降序替换，避免短名称误匹配长名称
+	const entries = Object.entries(nameToFullName).sort((a, b) => b[0].length - a[0].length);
+
+	for (const [bare, fullName] of entries) {
+		if (content.includes(fullName)) {
+			// 已经有完整名称，只需补充 proxy-groups 里的引用
+		}
+		// 替换 proxies 段里的 name 字段
+		content = content.replaceAll(`name: ${bare},`, `name: ${fullName},`);
+		content = content.replaceAll(`name: ${bare}}`, `name: ${fullName}}`);
+		// 替换 proxy-groups 里的引用（行尾换行）
+		content = content.replaceAll(`- ${bare}${lineBreak}`, `- ${fullName}${lineBreak}`);
+		// 文件末尾无换行
+		if (content.endsWith(`- ${bare}`)) {
+			content = content.slice(0, -(bare.length + 2)) + `- ${fullName}`;
 		}
 	}
 
@@ -662,7 +689,6 @@ function restoreEmoji(content, nodeText) {
 }
 
 
-// 根据代理名称中的 emoji 国旗，重新分配节点到对应的国家代理组
 function fixProxyGroups(content) {
 	// 思路：subconverter 已经按 ini 正则把节点分好组了，但节点名 emoji 被去掉了。
 	// 我们只需要：把 proxies 段里的带 emoji 节点名建立映射，
