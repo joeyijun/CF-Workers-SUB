@@ -1073,7 +1073,7 @@ function clashReinjectRegionGroups(content) {
 	return result.join(lineBreak);
 }
 
-
+function fixSubconverterGroupStructure(content) {
 	const lb = content.includes('\r\n') ? '\r\n' : '\n';
 	const lines = content.split(lb);
 	const TOP = /^[a-zA-Z][a-zA-Z0-9_-]*:/;
