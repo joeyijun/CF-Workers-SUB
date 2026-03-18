@@ -1089,10 +1089,7 @@ function clashReinjectRegionGroups(content) {
 
 // 从 proxy-groups 的 proxies 列表中删除对已删除地区分组的引用
 function removeGhostGroupRefs(content, deletedGroupNames) {
-	const lineBreak = content.includes('
-') ? '
-' : '
-';
+	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
 	const lines = content.split(lineBreak);
 	const TOP = /^[a-zA-Z][a-zA-Z0-9_-]*:/;
 	const result = [];
@@ -1112,8 +1109,7 @@ function removeGhostGroupRefs(content, deletedGroupNames) {
 			inGroupProxies = false;
 			result.push(line); continue;
 		}
-		if (trimmed === 'proxies:' && line !== 'proxies:' && line !== 'proxies:
-') {
+		if (trimmed === 'proxies:' && line !== 'proxies:' && line !== 'proxies:\r') {
 			inGroupProxies = true;
 			proxiesIndent = line.match(/^(\s*)/)[1];
 			result.push(line); continue;
