@@ -625,16 +625,34 @@ function restoreEmoji(content, nodeText) {
 		content = content.replaceAll(`name: ${baseName},`, `name: ${withEmoji},`);
 		// 替换代理列表引用: - baseName (行尾)
 		content = content.replaceAll(`- ${baseName}${lineBreak}`, `- ${withEmoji}${lineBreak}`);
+		// 处理文件末尾没有换行符的情况
+		if (content.endsWith(`- ${baseName}`)) content = content.slice(0, -baseName.length - 2) + `- ${withEmoji}`;
 
-		// 处理编号副本: baseName 2, baseName 3, ...
-		for (let i = 2; i <= 50; i++) {
-			const numbered = `${baseName} ${i}`;
-			const numberedWithEmoji = `${emoji} ${numbered}`;
-			if (content.includes(numberedWithEmoji)) continue;
-			if (!content.includes(numbered)) break;
-
-			content = content.replaceAll(`name: ${numbered},`, `name: ${numberedWithEmoji},`);
-			content = content.replaceAll(`- ${numbered}${lineBreak}`, `- ${numberedWithEmoji}${lineBreak}`);
+		// 处理编号副本，兼容两种格式：
+		// - "baseName 2"（有空格，subconverter 标准格式）
+		// - "baseName2"（无空格，subconverter 有时会用这种格式）
+		// - "baseName1"（第一个节点加了1，subconverter 有时会这样编号）
+		for (let i = 1; i <= 50; i++) {
+			// 有空格版本（从2开始）
+			if (i >= 2) {
+				const numbered = `${baseName} ${i}`;
+				const numberedWithEmoji = `${emoji} ${numbered}`;
+				if (!content.includes(numberedWithEmoji) && content.includes(numbered)) {
+					content = content.replaceAll(`name: ${numbered},`, `name: ${numberedWithEmoji},`);
+					content = content.replaceAll(`- ${numbered}${lineBreak}`, `- ${numberedWithEmoji}${lineBreak}`);
+					if (content.endsWith(`- ${numbered}`)) content = content.slice(0, -numbered.length - 2) + `- ${numberedWithEmoji}`;
+				}
+			}
+			// 无空格版本（baseName1, baseName2, ...）
+			const numberedNoSpace = `${baseName}${i}`;
+			const numberedNoSpaceWithEmoji = `${emoji} ${numberedNoSpace}`;
+			if (!content.includes(numberedNoSpaceWithEmoji) && content.includes(numberedNoSpace)) {
+				content = content.replaceAll(`name: ${numberedNoSpace},`, `name: ${numberedNoSpaceWithEmoji},`);
+				content = content.replaceAll(`- ${numberedNoSpace}${lineBreak}`, `- ${numberedNoSpaceWithEmoji}${lineBreak}`);
+				if (content.endsWith(`- ${numberedNoSpace}`)) content = content.slice(0, -numberedNoSpace.length - 2) + `- ${numberedNoSpaceWithEmoji}`;
+			}
+			// 两种格式都不存在则停止
+			if (i >= 2 && !content.includes(`${baseName} ${i}`) && !content.includes(`${baseName}${i}`)) break;
 		}
 	}
 
