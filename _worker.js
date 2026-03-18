@@ -626,8 +626,15 @@ function restoreEmoji(content, nodeText) {
 			const qIdx = trimmed.indexOf('?');
 			if (atIdx === -1) continue;
 			const hostPort = trimmed.slice(atIdx + 1, qIdx > -1 ? qIdx : hashIdx);
-			// 同一 server:port 只保留第一个（portToFullName 按出现顺序）
 			if (!portToFullName[hostPort]) portToFullName[hostPort] = fullName;
+			// IPv6 地址在原始链接中带方括号 [2400:...]:443，
+			// 但 subconverter 输出的 clash YAML 里 server 是裸 IPv6，port 单独字段，
+			// 拼出来的 key 是 2400:...:443（无方括号），额外存一份以便匹配。
+			const ipv6Match = hostPort.match(/^\[([^\]]+)\]:(\d+)$/);
+			if (ipv6Match) {
+				const bareKey = ipv6Match[1] + ':' + ipv6Match[2];
+				if (!portToFullName[bareKey]) portToFullName[bareKey] = fullName;
+			}
 		} catch (_) {}
 	}
 
