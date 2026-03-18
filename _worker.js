@@ -988,95 +988,147 @@ function clashReinjectRegionGroups(content) {
 		return null;
 	}
 
-	// 第3步：重写地区分组（旗帜开头的 proxy-group）的 proxies 列表
+	// 第3步：按 group 块处理 proxy-groups 段
+	// 策略：收集每个 group 的所有行，判断后再决定输出还是整块丢弃（空地区分组删除）
+	const result = [];
+
+	// 先找 proxy-groups 段的范围
+	let pgStart = -1;
+	for (let i = 0; i < lines.length; i++) {
+		if (TOP.test(lines[i]) && lines[i].split(':')[0].trim() === 'proxy-groups') {
+			pgStart = i; break;
+		}
+	}
+	if (pgStart === -1) return content;
+
+	let pgEnd = lines.length;
+	for (let i = pgStart + 1; i < lines.length; i++) {
+		if (TOP.test(lines[i])) { pgEnd = i; break; }
+	}
+
+	// 把 proxy-groups 段内容拆成独立的 group 块
+	const pgLines = lines.slice(pgStart + 1, pgEnd);
+	const groupBlocks = [];
+	let cur = null;
+	for (const l of pgLines) {
+		if (/^\s+- name:/.test(l) || /^\s+- \{name:/.test(l)) {
+			if (cur) groupBlocks.push(cur);
+			cur = [l];
+		} else if (cur) {
+			cur.push(l);
+		} else {
+			groupBlocks.push([l]);
+		}
+	}
+	if (cur) groupBlocks.push(cur);
+
+	// 处理每个 group 块
+	const processedGroups = [];
+	const deletedGroupNames = new Set();
+
+	for (const block of groupBlocks) {
+		const firstLine = block[0];
+		if (!(/^\s+- name:/.test(firstLine) || /^\s+- \{name:/.test(firstLine))) {
+			processedGroups.push(block); continue;
+		}
+		const nm = firstLine.match(/name:\s*"?([^",}\r\n]+)"?/);
+		if (!nm) { processedGroups.push(block); continue; }
+		const gName = nm[1].trim();
+		const flagM = gName.match(/^([\u{1F1E0}-\u{1F1FF}]{2})/u);
+		if (!flagM) { processedGroups.push(block); continue; } // 非地区分组，原样保留
+
+		const resolvedNames = resolveFlag(flagM[1]);
+		if (!resolvedNames) {
+			// 地区分组但无匹配节点 → 整块删除
+			deletedGroupNames.add(gName);
+			console.log('[clashReinjectRegionGroups] 删除空地区分组: ' + gName);
+			continue;
+		}
+
+		// 有匹配节点：重建 block，替换 proxies 列表
+		const newBlock = [];
+		let proxiesIndent = '';
+		let inProxies = false;
+		for (const line of block) {
+			const trimmed = line.trim();
+			if (trimmed === 'proxies:' && line !== 'proxies:' && line !== 'proxies:\r') {
+				inProxies = true;
+				proxiesIndent = line.match(/^(\s*)/)[1];
+				newBlock.push(line);
+				const itemIndent = proxiesIndent + '  ';
+				for (const name of resolvedNames) newBlock.push(itemIndent + '- ' + name);
+				continue;
+			}
+			if (inProxies && trimmed.startsWith('- ')) {
+				const li = line.match(/^(\s*)/)[1].length;
+				if (li > proxiesIndent.length) continue; // 跳过旧节点列表
+				else inProxies = false;
+			}
+			if (inProxies && !trimmed.startsWith('-')) inProxies = false;
+			newBlock.push(line);
+		}
+		processedGroups.push(newBlock);
+	}
+
+	// 重新组装整个文件
+	for (let i = 0; i < lines.length; i++) {
+		if (i === pgStart) {
+			result.push(lines[pgStart]);
+			for (const block of processedGroups) for (const l of block) result.push(l);
+			i = pgEnd - 1;
+			continue;
+		}
+		result.push(lines[i]);
+	}
+
+	// 从其他分组的 proxies 列表中删除已被删除的地区分组引用
+	if (deletedGroupNames.size === 0) return result.join(lineBreak);
+	return removeGhostGroupRefs(result.join(lineBreak), deletedGroupNames);
+}
+
+
+// 从 proxy-groups 的 proxies 列表中删除对已删除地区分组的引用
+function removeGhostGroupRefs(content, deletedGroupNames) {
+	const lineBreak = content.includes('
+') ? '
+' : '
+';
+	const lines = content.split(lineBreak);
+	const TOP = /^[a-zA-Z][a-zA-Z0-9_-]*:/;
 	const result = [];
 	let topSection = '';
 	let inGroupProxies = false;
 	let proxiesIndent = '';
-	let currentGroupFlag = null; // 当前 group 对应的旗帜（null 表示非地区组）
-	let skipProxyItems = false;  // 是否跳过当前 proxies 列表项（等待用新列表替换）
 
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i];
+	for (const line of lines) {
 		const trimmed = line.trim();
-
 		if (TOP.test(line)) {
 			topSection = line.split(':')[0].trim();
 			inGroupProxies = false;
-			currentGroupFlag = null;
-			skipProxyItems = false;
-			result.push(line);
-			continue;
+			result.push(line); continue;
 		}
-
-		if (topSection !== 'proxy-groups') {
-			result.push(line);
-			continue;
-		}
-
-		// 新 group 开始
+		if (topSection !== 'proxy-groups') { result.push(line); continue; }
 		if (/^\s+- name:/.test(line) || /^\s+- \{name:/.test(line)) {
 			inGroupProxies = false;
-			skipProxyItems = false;
-			// 提取 group 名，判断是否是地区组（旗帜开头）
-			const nm = line.match(/name:\s*"?([^",}\r\n]+)"?/);
-			if (nm) {
-				const gName = nm[1].trim();
-				const flagM = gName.match(/^([\u{1F1E0}-\u{1F1FF}]{2})/u);
-				currentGroupFlag = flagM ? flagM[1] : null;
-			} else {
-				currentGroupFlag = null;
-			}
-			result.push(line);
-			continue;
+			result.push(line); continue;
 		}
-
-		// 进入 proxies: 子段
-		if (trimmed === 'proxies:' && line !== 'proxies:' && line !== 'proxies:\r') {
+		if (trimmed === 'proxies:' && line !== 'proxies:' && line !== 'proxies:
+') {
 			inGroupProxies = true;
 			proxiesIndent = line.match(/^(\s*)/)[1];
-
-			const resolvedNames = currentGroupFlag ? resolveFlag(currentGroupFlag) : null;
-			if (resolvedNames) {
-				// 这是一个有匹配节点的地区组，跳过原有 proxies 列表，用新的替换
-				skipProxyItems = true;
-				result.push(line);
-				// 直接注入按旗帜过滤出来的节点
-				const itemIndent = proxiesIndent + '  ';
-				for (const name of resolvedNames) {
-					result.push(itemIndent + '- ' + name);
-				}
-			} else {
-				skipProxyItems = false;
-				result.push(line);
-			}
-			continue;
+			result.push(line); continue;
 		}
-
-		// 在 proxies 子列表中
 		if (inGroupProxies && trimmed.startsWith('- ')) {
-			const lineIndent = line.match(/^(\s*)/)[1].length;
-			if (lineIndent > proxiesIndent.length) {
-				if (skipProxyItems) {
-					// 跳过旧的列表项（已被上方新列表替换）
-					continue;
-				}
-				result.push(line);
-				continue;
-			} else {
-				inGroupProxies = false;
-				skipProxyItems = false;
-			}
+			const li = line.match(/^(\s*)/)[1].length;
+			if (li > proxiesIndent.length) {
+				const refName = trimmed.slice(2).trim();
+				if (deletedGroupNames.has(refName)) continue; // 删除引用
+				result.push(line); continue;
+			} else { inGroupProxies = false; }
 		}
-
-		if (inGroupProxies && !trimmed.startsWith('-')) {
-			inGroupProxies = false;
-			skipProxyItems = false;
-		}
-
+		if (inGroupProxies && !trimmed.startsWith('-')) inGroupProxies = false;
 		result.push(line);
 	}
-
 	return result.join(lineBreak);
 }
 
