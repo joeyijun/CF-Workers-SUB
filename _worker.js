@@ -632,6 +632,8 @@ function restoreEmoji(content, nodeText) {
 		// - "baseName 2"（有空格，subconverter 标准格式）
 		// - "baseName2"（无空格，subconverter 有时会用这种格式）
 		// - "baseName1"（第一个节点加了1，subconverter 有时会这样编号）
+		// 注意：如果 baseName 本身已以数字结尾（如 wanxy1），跳过编号处理避免产生 wanxy11 等错误 key
+		if (/\d$/.test(baseName)) continue;
 		for (let i = 1; i <= 50; i++) {
 			// 有空格版本（从2开始）
 			if (i >= 2) {
