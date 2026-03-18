@@ -603,19 +603,15 @@ function extractEmojiMap(nodeText) {
 	return emojiMap;
 }
 
-// 恢复 Clash 配置中被 subconverter 去掉的 emoji 国旗
-// 恢复 Clash 配置中被 subconverter 去掉的 emoji 国旗
-// 策略：和 singboxRestoreEmoji 一样，用 server:port 精确匹配，不依赖节点名字符串
+// 恢复 Clash 配置中被 subconverter 去掉/修改的节点名（emoji 国旗恢复）
+// 核心策略：用 server:port 精确匹配，完全不依赖节点名字符串
+// 支持 subconverter 对同名节点自动编号的情况（wanxy → wanxy1/wanxy2/wanxy3）
 function restoreEmoji(content, nodeText) {
 	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
-	const lines = nodeText.split('\n');
 
 	// 第1步：从原始链接构建 server:port → fullName 映射
 	const portToFullName = {};
-	// 同时构建 裸名(去emoji) → fullName 映射作为 fallback
-	const bareToFullName = {};
-
-	for (const line of lines) {
+	for (const line of nodeText.split('\n')) {
 		const trimmed = line.trim();
 		if (!trimmed.startsWith('vless://') && !trimmed.startsWith('trojan://') &&
 		    !trimmed.startsWith('vmess://') && !trimmed.startsWith('ss://')) continue;
@@ -623,65 +619,60 @@ function restoreEmoji(content, nodeText) {
 		if (hashIdx === -1) continue;
 		try {
 			const fullName = decodeURIComponent(trimmed.slice(hashIdx + 1)).trim();
-			// 只处理有 emoji 旗帜的节点名
 			if (!/[\u{1F1E0}-\u{1F1FF}]/u.test(fullName)) continue;
-
-			// 提取 server:port
 			const atIdx = trimmed.indexOf('@');
 			const qIdx = trimmed.indexOf('?');
-			if (atIdx > -1) {
-				const hostPort = trimmed.slice(atIdx + 1, qIdx > -1 ? qIdx : hashIdx);
-				if (!portToFullName[hostPort]) portToFullName[hostPort] = fullName;
-			}
-			// 裸名 fallback
-			const bare = fullName.replace(/^[\u{1F1E0}-\u{1F1FF}\u{1F300}-\u{1F9FF}\s]+/u, '').trim();
-			if (bare && !bareToFullName[bare]) bareToFullName[bare] = fullName;
+			if (atIdx === -1) continue;
+			const hostPort = trimmed.slice(atIdx + 1, qIdx > -1 ? qIdx : hashIdx);
+			// 同一 server:port 只保留第一个（portToFullName 按出现顺序）
+			if (!portToFullName[hostPort]) portToFullName[hostPort] = fullName;
 		} catch (_) {}
 	}
 
-	if (Object.keys(portToFullName).length === 0 && Object.keys(bareToFullName).length === 0) return content;
+	if (Object.keys(portToFullName).length === 0) return content;
 
-	// 第2步：解析 Clash YAML 的 proxies 段，建立 subconverter输出名 → fullName 映射
-	// subconverter 会去掉 emoji，我们需要知道每个裸名对应哪个 fullName
-	// 通过 server:port 匹配来确定
+	// 第2步：解析 proxies 段，建立 subconverter输出名 → fullName 的映射
+	// 用 server:port 匹配，不管 subconverter 给了什么名字
 	const TOP = /^[a-zA-Z][a-zA-Z0-9_-]*:/;
-	const contentLines = content.split(lineBreak);
-	const nameToFullName = {}; // subconverter裸名 → fullName
+	const lines = content.split(lineBreak);
+	const nameMap = {}; // subconverter名 → fullName
 
 	let section = '';
-	for (const line of contentLines) {
+	for (const line of lines) {
 		if (TOP.test(line)) { section = line.split(':')[0].trim(); continue; }
 		if (section !== 'proxies') continue;
 
-		// 单行格式: - {name: xxx, server: yyy, port: zzz, ...}
-		const inlineMatch = line.match(/name:\s*"?([^",}\r\n]+)"?.*?server:\s*"?([^",}\r\n]+)"?.*?port:\s*(\d+)/);
-		if (inlineMatch) {
-			const [, name, server, port] = inlineMatch;
-			const key = `${server.trim()}:${port.trim()}`;
-			const fullName = portToFullName[key] || bareToFullName[name.trim()];
-			if (fullName && fullName !== name.trim()) {
-				nameToFullName[name.trim()] = fullName;
-			}
+		// 提取 name、server、port
+		const nameMatch = line.match(/name:\s*"?([^",}\r\n]+)"?/);
+		const serverMatch = line.match(/server:\s*"?([^",}\r\n]+)"?/);
+		const portMatch = line.match(/port:\s*(\d+)/);
+		if (!nameMatch || !serverMatch || !portMatch) continue;
+
+		const name = nameMatch[1].trim();
+		const server = serverMatch[1].trim();
+		const port = portMatch[1].trim();
+		const key = `${server}:${port}`;
+
+		const fullName = portToFullName[key];
+		if (fullName && fullName !== name) {
+			nameMap[name] = fullName;
 		}
 	}
 
-	if (Object.keys(nameToFullName).length === 0) return content;
+	if (Object.keys(nameMap).length === 0) return content;
 
-	// 第3步：按名称长度降序替换，避免短名称误匹配长名称
-	const entries = Object.entries(nameToFullName).sort((a, b) => b[0].length - a[0].length);
+	// 第3步：按名称长度降序替换（避免短名误匹配长名）
+	const entries = Object.entries(nameMap).sort((a, b) => b[0].length - a[0].length);
 
-	for (const [bare, fullName] of entries) {
-		if (content.includes(fullName)) {
-			// 已经有完整名称，只需补充 proxy-groups 里的引用
-		}
-		// 替换 proxies 段里的 name 字段
-		content = content.replaceAll(`name: ${bare},`, `name: ${fullName},`);
-		content = content.replaceAll(`name: ${bare}}`, `name: ${fullName}}`);
-		// 替换 proxy-groups 里的引用（行尾换行）
-		content = content.replaceAll(`- ${bare}${lineBreak}`, `- ${fullName}${lineBreak}`);
+	for (const [oldName, fullName] of entries) {
+		// 替换 proxies 段 name 字段（单行格式 {name: xxx, ...}）
+		content = content.replaceAll(`name: ${oldName},`, `name: ${fullName},`);
+		content = content.replaceAll(`name: ${oldName}}`, `name: ${fullName}}`);
+		// 替换 proxy-groups 里的引用（行内换行）
+		content = content.replaceAll(`- ${oldName}${lineBreak}`, `- ${fullName}${lineBreak}`);
 		// 文件末尾无换行
-		if (content.endsWith(`- ${bare}`)) {
-			content = content.slice(0, -(bare.length + 2)) + `- ${fullName}`;
+		if (content.endsWith(`- ${oldName}`)) {
+			content = content.slice(0, -(oldName.length + 2)) + `- ${fullName}`;
 		}
 	}
 
