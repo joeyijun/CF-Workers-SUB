@@ -970,7 +970,7 @@ function clashReinjectRegionGroups(content) {
 	// 旗帜兼容映射：部分 ini 模板使用的旗帜与节点实际旗帜不同，在此统一处理
 	// 例如 🇺🇲（UM，联合国外岛）≠ 🇺🇸（US，美国），但都代表美国节点分组
 	const FLAG_COMPAT = {
-		'\u{1F1FA}\u{1F1F2}': '\u{1F1FA}\u{1F1F8}', // 🇺🇲 → 🇺🇸
+		'🇺🇲': '🇺🇸', // UM → US
 	};
 
 	// 查询某个分组旗帜对应的节点列表（含兼容映射）
