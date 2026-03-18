@@ -217,6 +217,8 @@ export default {
 						subConverterContent = fixProxyGroups(subConverterContent);
 						// fixProxyGroups 后节点名已正确，再清幽灵引用（避免误删）
 						subConverterContent = removeGhostProxyRefs(subConverterContent);
+						// 地区分组按旗帜 emoji 重新注入节点（修复 subconverter 用裸名匹配正则导致的分组为空问题）
+						subConverterContent = clashReinjectRegionGroups(subConverterContent);
 					} catch (e) {
 						console.log('emoji/分组恢复失败: ' + e.message);
 					}
@@ -633,9 +635,18 @@ function restoreEmoji(content, nodeText) {
 
 	// 第2步：解析 proxies 段，建立 subconverter输出名 → fullName 的映射
 	// 用 server:port 匹配，不管 subconverter 给了什么名字
+	// 对于同名节点（subconverter 自动编号如 wanxy / wanxy 2 / wanxy 3），
+	// 恢复时保留序号后缀，生成 🇯🇵 wanxy / 🇯🇵 wanxy 2 / 🇯🇵 wanxy 3，
+	// 避免所有同名节点都变成同一个名字后被 removeGhostProxyRefs 误删。
 	const TOP = /^[a-zA-Z][a-zA-Z0-9_-]*:/;
 	const lines = content.split(lineBreak);
 	const nameMap = {}; // subconverter名 → fullName
+
+	// 统计每个 fullName 在 portToFullName 中出现的次数（即同名节点数）
+	const fullNameCount = {};
+	for (const fn of Object.values(portToFullName)) {
+		fullNameCount[fn] = (fullNameCount[fn] || 0) + 1;
+	}
 
 	let section = '';
 	for (const line of lines) {
@@ -654,7 +665,32 @@ function restoreEmoji(content, nodeText) {
 		const key = `${server}:${port}`;
 
 		const fullName = portToFullName[key];
-		if (fullName && fullName !== name) {
+		if (!fullName || fullName === name) continue;
+
+		// 如果该 fullName 对应多个节点（同名节点），则需要保留 subconverter 追加的序号后缀
+		// subconverter 规则：第1个保持原名（wanxy），后续追加 " 2"、" 3"...（含空格）
+		// 我们把序号后缀拼到 emoji 后面：🇯🇵 wanxy / 🇯🇵 wanxy 2 / 🇯🇵 wanxy 3
+		if (fullNameCount[fullName] > 1) {
+			// 提取 subconverter 在名字末尾加的序号后缀（如 " 2"、" 3"）
+			// 原始裸名是 fullName 去掉 emoji 前缀
+			const bareBase = fullName.replace(/^[\u{1F1E0}-\u{1F1FF}\u{1F300}-\u{1F9FF}\s]+/u, '').trim();
+			// subconverter 会把原始名作为第一个，后面的在末尾加 " 2"、" 3"
+			// name 可能是 "wanxy"、"wanxy 2"、"wanxy 3"
+			// bareBase 是 "wanxy"，suffix 是 name 中 bareBase 之后的部分
+			let suffix = '';
+			if (name === bareBase) {
+				suffix = '';
+			} else if (name.startsWith(bareBase)) {
+				suffix = name.slice(bareBase.length); // 如 " 2"、" 3"
+			} else {
+				// 名字不匹配 bareBase，可能 subconverter 做了其他处理，直接用 fullName
+				nameMap[name] = fullName;
+				continue;
+			}
+			// 恢复后的名字：emoji前缀 + bareBase + suffix
+			const restoredName = fullName + suffix; // fullName 已含 emoji，suffix 如 "" / " 2" / " 3"
+			nameMap[name] = restoredName;
+		} else {
 			nameMap[name] = fullName;
 		}
 	}
@@ -692,7 +728,9 @@ function fixProxyGroups(content) {
 
 	// 第1步：从 proxies 段提取所有节点名，建立 裸名→带emoji名 的映射
 	// 带 emoji 的节点名是权威名（由 restoreEmoji 恢复），裸名是 subconverter 去掉 emoji 后的名字
-	const emojiNameMap = {}; // 裸名 → 带emoji名
+	// 对于同名节点（🇯🇵 wanxy / 🇯🇵 wanxy 2 / 🇯🇵 wanxy 3），
+	// 需要建立带序号后缀的映射：wanxy→🇯🇵 wanxy，wanxy 2→🇯🇵 wanxy 2，wanxy 3→🇯🇵 wanxy 3
+	const emojiNameMap = {}; // 裸名(含可能的序号后缀) → 带emoji名
 	const allEmojiNames = new Set(); // 所有带emoji的节点名
 	let section = '';
 	for (const line of lines) {
@@ -704,17 +742,24 @@ function fixProxyGroups(content) {
 		// 带 emoji 旗帜的节点名
 		if (/[\u{1F1E0}-\u{1F1FF}]/u.test(name)) {
 			allEmojiNames.add(name);
-			// 去掉 emoji 前缀得到裸名
+			// 去掉 emoji 前缀得到裸名（含可能的序号后缀，如 "wanxy" / "wanxy 2" / "wanxy 3"）
 			const bare = name.replace(/^[\u{1F1E0}-\u{1F1FF}\u{1F300}-\u{1F9FF}\s]+/u, '').trim();
 			if (bare && bare !== name) {
+				// 精确映射：裸名(含序号) → 带emoji完整名
 				emojiNameMap[bare] = name;
 				// subconverter 有时会去掉空格（"wanxy 2" → "wanxy2"），同时建立无空格版本的映射
 				const bareNoSpace = bare.replace(/\s+/g, '');
 				if (bareNoSpace !== bare) emojiNameMap[bareNoSpace] = name;
-				// subconverter 对第一个同名节点保持原名（"wanxy"），后续加数字无空格（"wanxy2","wanxy3"）
-				// 反过来，"wanxy1" 也可能对应原名 "wanxy"，建立 裸名+1 的映射
-				if (!bare.match(/\d+$/)) emojiNameMap[bare + '1'] = name;
 			}
+		}
+	}
+
+	// 对第一个同名节点（如 🇯🇵 wanxy，bare="wanxy"），
+	// subconverter 可能把它编为 "wanxy1"（无空格），补充该映射
+	// 但只在 bare 不以数字结尾且 "bare1" 尚未被其他节点占用时才建立
+	for (const [bare, emojiName] of Object.entries(emojiNameMap)) {
+		if (!bare.match(/\d+$/) && !emojiNameMap[bare + '1']) {
+			emojiNameMap[bare + '1'] = emojiName;
 		}
 	}
 
@@ -877,7 +922,158 @@ function removeGhostProxyRefs(content) {
 	return result.join(lineBreak);
 }
 
-function fixSubconverterGroupStructure(content) {
+// 地区分组按旗帜 emoji 重新注入节点
+// 背景：subconverter 用「裸名」（去掉 emoji 后的名字）匹配 ini 正则，
+// 节点名如 "🇯🇵 wanxy"，裸名 "wanxy" 无法命中 (日本|🇯🇵|JP) 正则，
+// 导致日本/新加坡/美国等分组为空（只剩 DIRECT）。
+// 修复策略：与 singboxInjectNodes 一致，直接用节点 tag 中的旗帜 emoji 重新填充地区分组。
+// 只处理「旗帜 emoji 开头」的 proxy-group（即地区分组），其他分组（节点选择、自动选择等）保持不变。
+function clashReinjectRegionGroups(content) {
+	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
+	const lines = content.split(lineBreak);
+	const TOP = /^[a-zA-Z][a-zA-Z0-9_-]*:/;
+
+	// 第1步：从 proxies 段收集所有真实节点名，按旗帜分组
+	// 旗帜 = 两个区域指示符字符（U+1F1E0-U+1F1FF）
+	const flagToProxyNames = {}; // "🇯🇵" → ["🇯🇵 wanxy", "🇯🇵 wanxy 2", ...]
+	const allProxyNames = [];
+	let section = '';
+	for (const line of lines) {
+		if (TOP.test(line)) { section = line.split(':')[0].trim(); continue; }
+		if (section !== 'proxies') continue;
+		const m = line.match(/name:\s*"?([^",}\r\n]+)"?\s*[,}]/);
+		if (!m) continue;
+		const name = m[1].trim();
+		allProxyNames.push(name);
+		const flagMatch = name.match(/^([\u{1F1E0}-\u{1F1FF}]{2})/u);
+		if (flagMatch) {
+			const flag = flagMatch[1];
+			if (!flagToProxyNames[flag]) flagToProxyNames[flag] = [];
+			flagToProxyNames[flag].push(name);
+		}
+	}
+
+	if (Object.keys(flagToProxyNames).length === 0) return content; // 无 emoji 节点，跳过
+
+	// 第2步：收集所有 proxy-group 名，用于保留现有的非节点引用
+	const groupNames = new Set();
+	section = '';
+	for (const line of lines) {
+		if (TOP.test(line)) { section = line.split(':')[0].trim(); continue; }
+		if (section !== 'proxy-groups') continue;
+		const m = line.match(/^\s+- (?:name:|{name:)\s*"?([^",}\r\n]+)"?/);
+		if (m) groupNames.add(m[1].trim());
+	}
+
+	const BUILTINS = new Set(['DIRECT', 'REJECT', 'GLOBAL', 'PASS']);
+
+	// 旗帜兼容映射：部分 ini 模板使用的旗帜与节点实际旗帜不同，在此统一处理
+	// 例如 🇺🇲（UM，联合国外岛）≠ 🇺🇸（US，美国），但都代表美国节点分组
+	const FLAG_COMPAT = {
+		'\u{1F1FA}\u{1F1F2}': '\u{1F1FA}\u{1F1F8}', // 🇺🇲 → 🇺🇸
+	};
+
+	// 查询某个分组旗帜对应的节点列表（含兼容映射）
+	function resolveFlag(groupFlag) {
+		if (flagToProxyNames[groupFlag]) return flagToProxyNames[groupFlag];
+		const compat = FLAG_COMPAT[groupFlag];
+		if (compat && flagToProxyNames[compat]) return flagToProxyNames[compat];
+		return null;
+	}
+
+	// 第3步：重写地区分组（旗帜开头的 proxy-group）的 proxies 列表
+	const result = [];
+	let topSection = '';
+	let inGroupProxies = false;
+	let proxiesIndent = '';
+	let currentGroupFlag = null; // 当前 group 对应的旗帜（null 表示非地区组）
+	let skipProxyItems = false;  // 是否跳过当前 proxies 列表项（等待用新列表替换）
+
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		const trimmed = line.trim();
+
+		if (TOP.test(line)) {
+			topSection = line.split(':')[0].trim();
+			inGroupProxies = false;
+			currentGroupFlag = null;
+			skipProxyItems = false;
+			result.push(line);
+			continue;
+		}
+
+		if (topSection !== 'proxy-groups') {
+			result.push(line);
+			continue;
+		}
+
+		// 新 group 开始
+		if (/^\s+- name:/.test(line) || /^\s+- \{name:/.test(line)) {
+			inGroupProxies = false;
+			skipProxyItems = false;
+			// 提取 group 名，判断是否是地区组（旗帜开头）
+			const nm = line.match(/name:\s*"?([^",}\r\n]+)"?/);
+			if (nm) {
+				const gName = nm[1].trim();
+				const flagM = gName.match(/^([\u{1F1E0}-\u{1F1FF}]{2})/u);
+				currentGroupFlag = flagM ? flagM[1] : null;
+			} else {
+				currentGroupFlag = null;
+			}
+			result.push(line);
+			continue;
+		}
+
+		// 进入 proxies: 子段
+		if (trimmed === 'proxies:' && line !== 'proxies:' && line !== 'proxies:\r') {
+			inGroupProxies = true;
+			proxiesIndent = line.match(/^(\s*)/)[1];
+
+			const resolvedNames = currentGroupFlag ? resolveFlag(currentGroupFlag) : null;
+			if (resolvedNames) {
+				// 这是一个有匹配节点的地区组，跳过原有 proxies 列表，用新的替换
+				skipProxyItems = true;
+				result.push(line);
+				// 直接注入按旗帜过滤出来的节点
+				const itemIndent = proxiesIndent + '  ';
+				for (const name of resolvedNames) {
+					result.push(itemIndent + '- ' + name);
+				}
+			} else {
+				skipProxyItems = false;
+				result.push(line);
+			}
+			continue;
+		}
+
+		// 在 proxies 子列表中
+		if (inGroupProxies && trimmed.startsWith('- ')) {
+			const lineIndent = line.match(/^(\s*)/)[1].length;
+			if (lineIndent > proxiesIndent.length) {
+				if (skipProxyItems) {
+					// 跳过旧的列表项（已被上方新列表替换）
+					continue;
+				}
+				result.push(line);
+				continue;
+			} else {
+				inGroupProxies = false;
+				skipProxyItems = false;
+			}
+		}
+
+		if (inGroupProxies && !trimmed.startsWith('-')) {
+			inGroupProxies = false;
+			skipProxyItems = false;
+		}
+
+		result.push(line);
+	}
+
+	return result.join(lineBreak);
+}
+
+
 	const lb = content.includes('\r\n') ? '\r\n' : '\n';
 	const lines = content.split(lb);
 	const TOP = /^[a-zA-Z][a-zA-Z0-9_-]*:/;
