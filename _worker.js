@@ -669,7 +669,15 @@ function fixProxyGroups(content) {
 			allEmojiNames.add(name);
 			// 去掉 emoji 前缀得到裸名
 			const bare = name.replace(/^[\u{1F1E0}-\u{1F1FF}\u{1F300}-\u{1F9FF}\s]+/u, '').trim();
-			if (bare && bare !== name) emojiNameMap[bare] = name;
+			if (bare && bare !== name) {
+				emojiNameMap[bare] = name;
+				// subconverter 有时会去掉空格（"wanxy 2" → "wanxy2"），同时建立无空格版本的映射
+				const bareNoSpace = bare.replace(/\s+/g, '');
+				if (bareNoSpace !== bare) emojiNameMap[bareNoSpace] = name;
+				// subconverter 对第一个同名节点保持原名（"wanxy"），后续加数字无空格（"wanxy2","wanxy3"）
+				// 反过来，"wanxy1" 也可能对应原名 "wanxy"，建立 裸名+1 的映射
+				if (!bare.match(/\d+$/)) emojiNameMap[bare + '1'] = name;
+			}
 		}
 	}
 
