@@ -663,22 +663,35 @@ function fixProxyGroups(content) {
 		}
 	}
 
-	// 第2步：按 emoji 国旗分组
-	const flagToProxies = {};
+	// 第2步：按关键词正则分组（支持旗帜不一致的情况，如组名 🇺🇲 但节点名 🇺🇸）
+	const regionPatterns = {
+		'HK': /港|🇭🇰|HK|hk|Hong Kong|HongKong|hongkong/,
+		'JP': /日本|川日|东京|大阪|泉日|埼玉|沪日|深日|🇯🇵|JP|Japan/,
+		'SG': /新加坡|坡|狮城|🇸🇬|SG|Singapore/,
+		'US': /美|🇺🇸|波特兰|达拉斯|俄勒冈|凤凰城|费利蒙|硅谷|拉斯维加斯|洛杉矶|圣何塞|圣克拉拉|西雅图|芝加哥|San Jose|San jose|Portland|Dallas|Oregon|Phoenix|Fremont|Silicon Valley|Los Angeles|Seattle|Chicago|US|United States/,
+	};
+	const regionGroupPatterns = {
+		'HK': /港|🇭🇰|香港/,
+		'JP': /日本|🇯🇵/,
+		'SG': /新加坡|狮城|🇸🇬/,
+		'US': /美国|🇺🇲|🇺🇸/,
+	};
+	// 节点按地区分类
+	const regionToProxies = { HK: [], JP: [], SG: [], US: [] };
 	for (const name of allProxyNames) {
-		const match = name.match(/^([\u{1F1E6}-\u{1F1FF}]{2})\s/u);
-		if (match) {
-			const flag = match[1];
-			if (!flagToProxies[flag]) flagToProxies[flag] = [];
-			flagToProxies[flag].push(name);
+		for (const [region, pattern] of Object.entries(regionPatterns)) {
+			if (pattern.test(name)) {
+				regionToProxies[region].push(name);
+				break;
+			}
 		}
 	}
-	if (Object.keys(flagToProxies).length === 0) return content;
+	if (Object.values(regionToProxies).every(arr => arr.length === 0)) return content;
 
 	// 第3步：逐行处理，仅在 proxy-groups 段内、且当前组是国家组时替换其 proxies 列表
 	const result = [];
 	let topSection = '';
-	let currentGroupFlag = null;
+	let currentGroupRegion = null;
 	let inGroupProxiesList = false;
 	let proxiesIndent = '';
 	let addedNewProxies = false;
@@ -705,21 +718,28 @@ function fixProxyGroups(content) {
 		if (/^\s+- name:/.test(line) || /^\s+- \{name:/.test(line)) {
 			inGroupProxiesList = false;
 			addedNewProxies = false;
-			currentGroupFlag = null;
-			const flagMatch = line.match(/name:\s*"?([\u{1F1E6}-\u{1F1FF}]{2})\s/u);
-			if (flagMatch && flagToProxies[flagMatch[1]]) {
-				currentGroupFlag = flagMatch[1];
+			currentGroupRegion = null;
+			// 用关键词正则判断当前组是哪个地区组
+			const nameMatch = line.match(/name:\s*"?([^"\r\n,}]+)/);
+			if (nameMatch) {
+				const groupName = nameMatch[1].trim();
+				for (const [region, pattern] of Object.entries(regionGroupPatterns)) {
+					if (pattern.test(groupName) && regionToProxies[region].length > 0) {
+						currentGroupRegion = region;
+						break;
+					}
+				}
 			}
 			result.push(line);
 			continue;
 		}
 
 		// 检测国家组内有缩进的 proxies: 子段（排除顶级 proxies:）
-		if (currentGroupFlag && trimmed === 'proxies:' && line !== 'proxies:' && line !== 'proxies:\r') {
+		if (currentGroupRegion && trimmed === 'proxies:' && line !== 'proxies:' && line !== 'proxies:\r') {
 			inGroupProxiesList = true;
 			proxiesIndent = line.match(/^(\s*)/)[1];
 			result.push(line);
-			for (const proxyName of flagToProxies[currentGroupFlag]) {
+			for (const proxyName of regionToProxies[currentGroupRegion]) {
 				result.push(`${proxiesIndent}  - ${proxyName}`);
 			}
 			addedNewProxies = true;
@@ -736,10 +756,16 @@ function fixProxyGroups(content) {
 				inGroupProxiesList = false;
 				addedNewProxies = false;
 				if (/^\s+- name:/.test(line) || /^\s+- \{name:/.test(line)) {
-					currentGroupFlag = null;
-					const flagMatch = line.match(/name:\s*"?([\u{1F1E6}-\u{1F1FF}]{2})\s/u);
-					if (flagMatch && flagToProxies[flagMatch[1]]) {
-						currentGroupFlag = flagMatch[1];
+					currentGroupRegion = null;
+					const nameMatch2 = line.match(/name:\s*"?([^"\r\n,}]+)/);
+					if (nameMatch2) {
+						const groupName2 = nameMatch2[1].trim();
+						for (const [region, pattern] of Object.entries(regionGroupPatterns)) {
+							if (pattern.test(groupName2) && regionToProxies[region].length > 0) {
+								currentGroupRegion = region;
+								break;
+							}
+						}
 					}
 				}
 				result.push(line);
@@ -1061,7 +1087,7 @@ function singboxInjectNodes(nodesJson, templateJson) {
 		'🇭🇰': /港|🇭🇰|HK|hk|Hong Kong|HongKong|hongkong/,
 		'🇯🇵': /日本|川日|东京|大阪|泉日|埼玉|沪日|深日|🇯🇵|JP|Japan/,
 		'🇸🇬': /新加坡|坡|狮城|🇸🇬|SG|Singapore/,
-		'🇺🇲': /美|🇺🇸|波特兰|达拉斯|俄勒冈|凤凰城|费利蒙|硅谷|拉斯维加斯|洛杉矶|圣何塞|圣克拉拉|西雅图|芝加哥|US|United States/,
+		'🇺🇲': /美|🇺🇸|波特兰|达拉斯|俄勒冈|凤凰城|费利蒙|硅谷|拉斯维加斯|洛杉矶|圣何塞|圣克拉拉|西雅图|芝加哥|San Jose|San jose|Portland|Dallas|Oregon|Phoenix|Fremont|Silicon Valley|Los Angeles|Seattle|Chicago|US|United States/,
 	};
 
 	// 按地区分类节点
