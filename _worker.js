@@ -213,10 +213,10 @@ export default {
 					// 恢复被 subconverter 去掉的 emoji 国旗
 					try {
 						subConverterContent = restoreEmoji(subConverterContent, result);
-						// emoji 恢复后再清幽灵引用（此时节点名已含 emoji，匹配才准确）
-						subConverterContent = removeGhostProxyRefs(subConverterContent);
-						// 根据恢复的 emoji 重新分配节点到对应国家组
+						// emoji 恢复后先同步分组里的节点名，再清幽灵引用
 						subConverterContent = fixProxyGroups(subConverterContent);
+						// fixProxyGroups 后节点名已正确，再清幽灵引用（避免误删）
+						subConverterContent = removeGhostProxyRefs(subConverterContent);
 					} catch (e) {
 						console.log('emoji/分组恢复失败: ' + e.message);
 					}
