@@ -1,63 +1,51 @@
 // 部署完成后在网址后面加上这个，获取自建节点和机场聚合节点，/?token=auto或/auto或
 
-let mytoken = 'auto';
-let guestToken = ''; //可以随便取，或者uuid生成，https://1024tools.com/uuid
-let BotToken = ''; //可以为空，或者@BotFather中输入/start，/newbot，并关注机器人
-let ChatID = ''; //可以为空，或者@userinfobot中获取，/start
-let TG = 0; //小白勿动， 开发者专用，1 为推送所有的访问信息，0 为不推送订阅转换后端的访问信息与异常访问
-let FileName = 'CF-Workers-SUB';
-let SUBUpdateTime = 6; //自定义订阅更新时间，单位小时
-let total = 99;//TB
-let timestamp = 4102329600000;//2099-12-31
+const DEFAULT_TOKEN = 'auto';
+const DEFAULT_GUEST_TOKEN = '';
+const DEFAULT_BOT_TOKEN = '';
+const DEFAULT_CHAT_ID = '';
+const DEFAULT_TG = 0;
+const DEFAULT_FILE_NAME = 'CF-Workers-SUB';
+const DEFAULT_SUB_UPDATE_TIME = 6;
 
 //节点链接 + 订阅链接
-let MainData = `
+const DEFAULT_MAIN_DATA = `
 https://cfxr.eu.org/getSub
 `;
 
-let urls = [];
-let subConverter = "SUBAPI.cmliussss.net"; //在线订阅转换后端，目前使用CM的订阅转换功能。支持自建psub 可自行搭建https://github.com/bulianglin/psub
-let subConfig = "https://raw.githubusercontent.com/cmliu/ACL4SSR/main/Clash/config/ACL4SSR_Online_MultiCountry.ini"; //订阅配置文件
-let sbConfig = ""; // sing-box JSON 模板地址
-let subProtocol = 'https';
+const DEFAULT_SUB_CONVERTER = "SUBAPI.cmliussss.net"; //在线订阅转换后端，目前使用CM的订阅转换功能。支持自建psub 可自行搭建https://github.com/bulianglin/psub
+const DEFAULT_SUB_CONFIG = "https://raw.githubusercontent.com/cmliu/ACL4SSR/main/Clash/config/ACL4SSR_Online_MultiCountry.ini"; //订阅配置文件
+const DEFAULT_SB_CONFIG = ""; // sing-box JSON 模板地址
 
 export default {
 	async fetch(request, env) {
-		const userAgentHeader = request.headers.get('User-Agent');
+		const userAgentHeader = request.headers.get('User-Agent') || '';
 		const userAgent = userAgentHeader ? userAgentHeader.toLowerCase() : "null";
 		const url = new URL(request.url);
 		const token = url.searchParams.get('token');
-		mytoken = env.TOKEN || mytoken;
-		BotToken = env.TGTOKEN || BotToken;
-		ChatID = env.TGID || ChatID;
-		TG = env.TG || TG;
-		subConverter = env.SUBAPI || subConverter;
-		if (subConverter.includes("http://")) {
-			subConverter = subConverter.split("//")[1];
-			subProtocol = 'http';
-		} else {
-			subConverter = subConverter.split("//")[1] || subConverter;
-		}
-		subConfig = env.SUBCONFIG || subConfig;
-		sbConfig = env.SBCONFIG || sbConfig;
-		FileName = env.SUBNAME || FileName;
+		const mytoken = env.TOKEN || DEFAULT_TOKEN;
+		const botToken = env.TGTOKEN || DEFAULT_BOT_TOKEN;
+		const chatID = env.TGID || DEFAULT_CHAT_ID;
+		const tgEnabled = Number(env.TG ?? DEFAULT_TG) === 1;
+		const converter = parseSubConverter(env.SUBAPI || DEFAULT_SUB_CONVERTER);
+		const subConverter = converter.host;
+		const subProtocol = converter.protocol;
+		const subConfig = env.SUBCONFIG || DEFAULT_SUB_CONFIG;
+		let sbConfig = env.SBCONFIG || DEFAULT_SB_CONFIG;
+		const fileName = env.SUBNAME || DEFAULT_FILE_NAME;
+		const subUpdateTime = env.SUBUPTIME || DEFAULT_SUB_UPDATE_TIME;
+		const subTimeoutMs = clampNumber(env.SUBTIMEOUT, 1000, 30000, 8000);
 
 		const currentDate = new Date();
 		currentDate.setHours(0, 0, 0, 0);
 		const timeTemp = Math.ceil(currentDate.getTime() / 1000);
 		const fakeToken = await MD5MD5(`${mytoken}${timeTemp}`);
-		guestToken = env.GUESTTOKEN || env.GUEST || guestToken;
+		let guestToken = env.GUESTTOKEN || env.GUEST || DEFAULT_GUEST_TOKEN;
 		if (!guestToken) guestToken = await MD5MD5(mytoken);
 		const 访客订阅 = guestToken;
-		//console.log(`${fakeUserID}\n${fakeHostName}`); // 打印fakeID
 
-		let UD = Math.floor(((timestamp - Date.now()) / timestamp * total * 1099511627776) / 2);
-		total = total * 1099511627776;
-		let expire = Math.floor(timestamp / 1000);
-		SUBUpdateTime = env.SUBUPTIME || SUBUpdateTime;
-
-		if (!([mytoken, fakeToken, 访客订阅].includes(token) || url.pathname == ("/" + mytoken) || url.pathname.includes("/" + mytoken + "?"))) {
-			if (TG == 1 && url.pathname !== "/" && url.pathname !== "/favicon.ico") await sendMessage(`#异常访问 ${FileName}`, request.headers.get('CF-Connecting-IP'), `UA: ${userAgent}</tg-spoiler>\n域名: ${url.hostname}\n<tg-spoiler>入口: ${url.pathname + url.search}</tg-spoiler>`);
+		if (!([mytoken, fakeToken, 访客订阅].includes(token) || url.pathname === ("/" + mytoken))) {
+			if (tgEnabled && url.pathname !== "/" && url.pathname !== "/favicon.ico") await sendMessage(`#异常访问 ${fileName}`, request.headers.get('CF-Connecting-IP'), `UA: ${userAgent}</tg-spoiler>\n域名: ${url.hostname}\n<tg-spoiler>入口: ${url.pathname + url.search}</tg-spoiler>`, botToken, chatID);
 			if (env.URL302) return Response.redirect(env.URL302, 302);
 			else if (env.URL) return await proxyURL(env.URL, url);
 			else return new Response(await nginx(), {
@@ -67,19 +55,28 @@ export default {
 				},
 			});
 		} else {
+			let mainData = DEFAULT_MAIN_DATA;
+			let urls = [];
 			if (env.KV) {
 				await 迁移地址列表(env, 'LINK.txt');
 				if (userAgent.includes('mozilla') && !url.search) {
-					await sendMessage(`#编辑订阅 ${FileName}`, request.headers.get('CF-Connecting-IP'), `UA: ${userAgentHeader}</tg-spoiler>\n域名: ${url.hostname}\n<tg-spoiler>入口: ${url.pathname + url.search}</tg-spoiler>`);
-					return await KV(request, env, 'LINK.txt', 访客订阅);
+					await sendMessage(`#编辑订阅 ${fileName}`, request.headers.get('CF-Connecting-IP'), `UA: ${userAgentHeader}</tg-spoiler>\n域名: ${url.hostname}\n<tg-spoiler>入口: ${url.pathname + url.search}</tg-spoiler>`, botToken, chatID);
+					return await KV(request, env, 'LINK.txt', 访客订阅, {
+						fileName,
+						mytoken,
+						sbConfig,
+						subProtocol,
+						subConverter,
+						subConfig,
+					});
 				} else {
-					MainData = await env.KV.get('LINK.txt') || MainData;
+					mainData = await env.KV.get('LINK.txt') || mainData;
 				}
 			} else {
-				MainData = env.LINK || MainData;
+				mainData = env.LINK || mainData;
 				if (env.LINKSUB) urls = await ADD(env.LINKSUB);
 			}
-			let 重新汇总所有链接 = await ADD(MainData + '\n' + urls.join('\n'));
+			let 重新汇总所有链接 = await ADD(mainData + '\n' + urls.join('\n'));
 			let 自建节点 = "";
 			let 订阅链接 = "";
 			for (let x of 重新汇总所有链接) {
@@ -89,14 +86,14 @@ export default {
 					自建节点 += x + '\n';
 				}
 			}
-			MainData = 自建节点;
+			mainData = 自建节点;
 			urls = await ADD(订阅链接);
-			await sendMessage(`#获取订阅 ${FileName}`, request.headers.get('CF-Connecting-IP'), `UA: ${userAgentHeader}</tg-spoiler>\n域名: ${url.hostname}\n<tg-spoiler>入口: ${url.pathname + url.search}</tg-spoiler>`);
+			await sendMessage(`#获取订阅 ${fileName}`, request.headers.get('CF-Connecting-IP'), `UA: ${userAgentHeader}</tg-spoiler>\n域名: ${url.hostname}\n<tg-spoiler>入口: ${url.pathname + url.search}</tg-spoiler>`, botToken, chatID);
 			const isSubConverterRequest = request.headers.get('subconverter-request') || request.headers.get('subconverter-version') || userAgent.includes('subconverter');
 			let 订阅格式 = 'base64';
 			if (!(userAgent.includes('null') || isSubConverterRequest || userAgent.includes('nekobox') || userAgent.includes(('CF-Workers-SUB').toLowerCase()))) {
 				if (userAgent.includes('sing-box') || userAgent.includes('singbox') || url.searchParams.has('sb') || url.searchParams.has('singbox')) {
-					if (url.searchParams.has('sbconfig')) sbConfig = decodeURIComponent(url.searchParams.get('sbconfig'));
+					if (url.searchParams.has('sbconfig')) sbConfig = url.searchParams.get('sbconfig') || sbConfig;
 					订阅格式 = 'singbox';
 				} else if (userAgent.includes('surge') || url.searchParams.has('surge')) {
 					订阅格式 = 'surge';
@@ -112,7 +109,7 @@ export default {
 			let subConverterUrl;
 			let 订阅转换URL = `${url.origin}/${await MD5MD5(fakeToken)}?token=${fakeToken}`;
 			//console.log(订阅转换URL);
-			let req_data = MainData;
+			let req_data = mainData;
 
 			let 追加UA = 'v2rayn';
 			if (url.searchParams.has('b64') || url.searchParams.has('base64')) 订阅格式 = 'base64';
@@ -124,17 +121,17 @@ export default {
 
 			const 订阅链接数组 = [...new Set(urls)].filter(item => item?.trim?.()); // 去重
 			if (订阅链接数组.length > 0) {
-				const 请求订阅响应内容 = await getSUB(订阅链接数组, request, 追加UA, userAgentHeader);
+				const 请求订阅响应内容 = await getSUB(订阅链接数组, request, 追加UA, userAgentHeader, subTimeoutMs);
 				console.log(请求订阅响应内容);
 				req_data += 请求订阅响应内容[0].join('\n');
-				订阅转换URL += "|" + 请求订阅响应内容[1];
+				if (请求订阅响应内容[1]) 订阅转换URL += "|" + 请求订阅响应内容[1];
 				if (订阅格式 == 'base64' && !isSubConverterRequest && 请求订阅响应内容[1].includes('://')) {
 					subConverterUrl = `${subProtocol}://${subConverter}/sub?target=mixed&url=${encodeURIComponent(请求订阅响应内容[1])}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=false&scv=true&fdn=false&sort=false&new_name=true`;
 					try {
 						const subConverterResponse = await fetch(subConverterUrl, { headers: { 'User-Agent': 'v2rayN/CF-Workers-SUB  (https://github.com/cmliu/CF-Workers-SUB)' } });
 						if (subConverterResponse.ok) {
 							const subConverterContent = await subConverterResponse.text();
-							req_data += '\n' + atob(subConverterContent);
+							req_data += '\n' + base64Decode(subConverterContent);
 						}
 					} catch (error) {
 						console.log('订阅转换请回base64失败，检查订阅转换后端是否正常运行');
@@ -148,44 +145,19 @@ export default {
 			const encodedData = utf8Encoder.encode(req_data);
 			//const text = String.fromCharCode.apply(null, encodedData);
 			const utf8Decoder = new TextDecoder();
-			const text = utf8Decoder.decode(encodedData);
+			const text = normalizeNodeNames(utf8Decoder.decode(encodedData));
 
 			//去重
 			const uniqueLines = new Set(text.split('\n'));
 			const result = [...uniqueLines].join('\n');
 			//console.log(result);
 
-			let base64Data;
-			try {
-				base64Data = btoa(result);
-			} catch (e) {
-				function encodeBase64(data) {
-					const binary = new TextEncoder().encode(data);
-					let base64 = '';
-					const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-
-					for (let i = 0; i < binary.length; i += 3) {
-						const byte1 = binary[i];
-						const byte2 = binary[i + 1] || 0;
-						const byte3 = binary[i + 2] || 0;
-
-						base64 += chars[byte1 >> 2];
-						base64 += chars[((byte1 & 3) << 4) | (byte2 >> 4)];
-						base64 += chars[((byte2 & 15) << 2) | (byte3 >> 6)];
-						base64 += chars[byte3 & 63];
-					}
-
-					const padding = 3 - (binary.length % 3 || 3);
-					return base64.slice(0, base64.length - padding) + '=='.slice(0, padding);
-				}
-
-				base64Data = encodeBase64(result)
-			}
+			const base64Data = base64Encode(result);
 
 			// 构建响应头对象
 			const responseHeaders = {
 				"content-type": "text/plain; charset=utf-8",
-				"Profile-Update-Interval": `${SUBUpdateTime}`,
+				"Profile-Update-Interval": `${subUpdateTime}`,
 				"Profile-web-page-url": request.url.includes('?') ? request.url.split('?')[0] : request.url,
 				//"Subscription-Userinfo": `upload=${UD}; download=${UD}; total=${total}; expire=${expire}`,
 			};
@@ -209,7 +181,7 @@ export default {
 				if (!subConverterResponse.ok) return new Response(base64Data, { headers: responseHeaders });
 				let subConverterContent = await subConverterResponse.text();
 				if (订阅格式 == 'clash') {
-					subConverterContent = await clashFix(subConverterContent);
+					subConverterContent = await clashFix(subConverterContent, result);
 					// 恢复被 subconverter 去掉的 emoji 国旗
 					try {
 						subConverterContent = restoreEmoji(subConverterContent, result);
@@ -264,7 +236,7 @@ export default {
 					}
 				}
 				// 只有非浏览器订阅才会返回SUBNAME
-				if (!userAgent.includes('mozilla')) responseHeaders["Content-Disposition"] = `attachment; filename*=utf-8''${encodeURIComponent(FileName)}`;
+				if (!userAgent.includes('mozilla')) responseHeaders["Content-Disposition"] = `attachment; filename*=utf-8''${encodeURIComponent(fileName)}`;
 				return new Response(subConverterContent, { headers: responseHeaders });
 			} catch (error) {
 				return new Response(base64Data, { headers: responseHeaders });
@@ -273,8 +245,176 @@ export default {
 	}
 };
 
+function parseSubConverter(value) {
+	const raw = String(value || DEFAULT_SUB_CONVERTER).trim().replace(/\/+$/, '');
+	const match = raw.match(/^(https?):\/\/(.+)$/i);
+	return match
+		? { protocol: match[1].toLowerCase(), host: match[2] }
+		: { protocol: 'https', host: raw };
+}
+
+function clampNumber(value, min, max, fallback) {
+	const number = Number(value);
+	if (!Number.isFinite(number)) return fallback;
+	return Math.min(max, Math.max(min, Math.round(number)));
+}
+
+const COUNTRY_NAME_RULES = [
+	['🇭🇰', /香港|hong\s*kong|(?:^|[\s_.|()[\]-])hk(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇲🇴', /澳门|macao|macau|(?:^|[\s_.|()[\]-])mo(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇹🇼', /台湾|台灣|taiwan|(?:^|[\s_.|()[\]-])tw(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇯🇵', /日本|东京|東京|大阪|japan|tokyo|osaka|(?:^|[\s_.|()[\]-])jp(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇸🇬', /新加坡|狮城|獅城|singapore|(?:^|[\s_.|()[\]-])sg(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇺🇸', /美国|美國|洛杉矶|洛杉磯|西雅图|西雅圖|纽约|紐約|united\s*states|america|los\s*angeles|seattle|new\s*york|(?:^|[\s_.|()[\]-])(?:us|usa)(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇰🇷', /韩国|韓國|首尔|首爾|korea|seoul|(?:^|[\s_.|()[\]-])kr(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇬🇧', /英国|英國|伦敦|倫敦|united\s*kingdom|britain|london|(?:^|[\s_.|()[\]-])(?:uk|gb)(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇩🇪', /德国|德國|法兰克福|法蘭克福|germany|frankfurt|(?:^|[\s_.|()[\]-])de(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇫🇷', /法国|法國|巴黎|france|paris|(?:^|[\s_.|()[\]-])fr(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇨🇦', /加拿大|多伦多|多倫多|canada|toronto|(?:^|[\s_.|()[\]-])ca(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇦🇺', /澳大利亚|澳大利亞|澳洲|悉尼|australia|sydney|(?:^|[\s_.|()[\]-])au(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇷🇺', /俄罗斯|俄羅斯|莫斯科|russia|moscow|(?:^|[\s_.|()[\]-])ru(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇮🇳', /印度|孟买|孟買|india|mumbai|(?:^|[\s_.|()[\]-])in(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇳🇱', /荷兰|荷蘭|阿姆斯特丹|netherlands|amsterdam|(?:^|[\s_.|()[\]-])nl(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇹🇷', /土耳其|伊斯坦布尔|伊斯坦堡|turkey|istanbul|(?:^|[\s_.|()[\]-])tr(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇧🇷', /巴西|圣保罗|聖保羅|brazil|sao\s*paulo|(?:^|[\s_.|()[\]-])br(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇹🇭', /泰国|泰國|曼谷|thailand|bangkok|(?:^|[\s_.|()[\]-])th(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇻🇳', /越南|河内|河內|vietnam|hanoi|(?:^|[\s_.|()[\]-])vn(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇲🇾', /马来西亚|馬來西亞|吉隆坡|malaysia|kuala\s*lumpur|(?:^|[\s_.|()[\]-])my(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇵🇭', /菲律宾|菲律賓|马尼拉|馬尼拉|philippines|manila|(?:^|[\s_.|()[\]-])ph(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇮🇩', /印度尼西亚|印度尼西亞|印尼|雅加达|雅加達|indonesia|jakarta|(?:^|[\s_.|()[\]-])id(?:\d+|[\s_.|()[\]-]|$)/i],
+	['🇦🇪', /阿联酋|阿聯酋|迪拜|dubai|united\s*arab\s*emirates|(?:^|[\s_.|()[\]-])(?:ae|uae)(?:\d+|[\s_.|()[\]-]|$)/i],
+];
+
+function safeDecodeURIComponent(value) {
+	try {
+		return decodeURIComponent(value);
+	} catch (_) {
+		return value;
+	}
+}
+
+function detectCountryFlag(name) {
+	if (!name) return '';
+	const existing = name.match(/^([\u{1F1E6}-\u{1F1FF}]{2})/u);
+	if (existing) return existing[1];
+	for (const [flag, pattern] of COUNTRY_NAME_RULES) {
+		if (pattern.test(name)) return flag;
+	}
+	return '';
+}
+
+function normalizeNodeName(name) {
+	const trimmed = String(name || '').trim();
+	if (!trimmed || /^[\u{1F1E6}-\u{1F1FF}]{2}/u.test(trimmed)) return trimmed;
+	const flag = detectCountryFlag(trimmed);
+	return flag ? `${flag} ${trimmed}` : trimmed;
+}
+
+function normalizeNodeNames(nodeText) {
+	return String(nodeText || '').split(/\r?\n/).map(line => {
+		const trimmed = line.trim();
+		if (!trimmed) return '';
+		try {
+			if (trimmed.startsWith('vmess://')) {
+				const config = JSON.parse(base64Decode(trimmed.slice(8)));
+				const normalized = normalizeNodeName(config.ps);
+				if (!normalized || normalized === config.ps) return trimmed;
+				config.ps = normalized;
+				return 'vmess://' + base64Encode(JSON.stringify(config));
+			}
+			if (/^(?:vless|trojan|ss|hy2|hysteria2?|tuic):\/\//i.test(trimmed)) {
+				const hashIndex = trimmed.lastIndexOf('#');
+				if (hashIndex === -1) return trimmed;
+				const oldName = safeDecodeURIComponent(trimmed.slice(hashIndex + 1));
+				const normalized = normalizeNodeName(oldName);
+				if (!normalized || normalized === oldName) return trimmed;
+				return trimmed.slice(0, hashIndex + 1) + encodeURIComponent(normalized);
+			}
+		} catch (_) {}
+		return trimmed;
+	}).filter(Boolean).join('\n');
+}
+
+function normalizeServer(server) {
+	return String(server || '').trim().replace(/^\[|\]$/g, '').toLowerCase();
+}
+
+function endpointKey(server, port) {
+	const normalizedServer = normalizeServer(server);
+	const normalizedPort = String(port || '').trim();
+	return normalizedServer && normalizedPort ? `${normalizedServer}:${normalizedPort}` : '';
+}
+
+function extractYamlField(line, field) {
+	const marker = `${field}:`;
+	const markerIndex = line.indexOf(marker);
+	if (markerIndex === -1) return '';
+	let index = markerIndex + marker.length;
+	while (/\s/.test(line[index] || '')) index++;
+	const quote = line[index];
+	if (quote === '"' || quote === "'") {
+		let value = '';
+		for (index++; index < line.length; index++) {
+			const char = line[index];
+			if (char === quote && line[index - 1] !== '\\') return value;
+			value += char;
+		}
+		return value;
+	}
+	let end = index;
+	while (end < line.length && line[end] !== ',' && line[end] !== '}') end++;
+	return line.slice(index, end).trim();
+}
+
+function parseYamlScalar(value) {
+	const trimmed = String(value || '').trim();
+	if (trimmed.length >= 2 && ((trimmed[0] === '"' && trimmed.at(-1) === '"') || (trimmed[0] === "'" && trimmed.at(-1) === "'"))) {
+		return trimmed.slice(1, -1);
+	}
+	return trimmed;
+}
+
+function yamlQuote(value) {
+	return JSON.stringify(String(value || ''));
+}
+
+function parseRawNodeMetadata(nodeText) {
+	const nodes = [];
+	for (const line of String(nodeText || '').split(/\r?\n/)) {
+		const raw = line.trim();
+		if (!raw) continue;
+		try {
+			if (raw.startsWith('vmess://')) {
+				const config = JSON.parse(base64Decode(raw.slice(8)));
+				nodes.push({
+					protocol: 'vmess',
+					name: String(config.ps || '').trim(),
+					server: normalizeServer(config.add),
+					port: String(config.port || '').trim(),
+					credential: String(config.id || '').trim(),
+					transport: String(config.net || '').toLowerCase(),
+					serviceName: String(config.path || '').replace(/^\//, ''),
+				});
+				continue;
+			}
+			if (!/^(?:vless|trojan|ss|hy2|hysteria2?|tuic):\/\//i.test(raw)) continue;
+			const parsed = new URL(raw);
+			nodes.push({
+				protocol: parsed.protocol.slice(0, -1).toLowerCase(),
+				name: safeDecodeURIComponent(parsed.hash.slice(1)).trim(),
+				server: normalizeServer(parsed.hostname),
+				port: String(parsed.port || '').trim(),
+				credential: safeDecodeURIComponent(parsed.username || '').trim(),
+				transport: String(parsed.searchParams.get('type') || '').toLowerCase(),
+				serviceName: String(parsed.searchParams.get('serviceName') || parsed.searchParams.get('service_name') || ''),
+			});
+		} catch (_) {}
+	}
+	return nodes.filter(node => node.server && node.port);
+}
+
 async function ADD(envadd) {
-	var addtext = envadd.replace(/[	"'|\r\n]+/g, '\n').replace(/\n+/g, '\n');	// 替换为换行
+	var addtext = String(envadd || '').replace(/[	"'|\r\n]+/g, '\n').replace(/\n+/g, '\n');	// 替换为换行
 	//console.log(addtext);
 	if (addtext.charAt(0) == '\n') addtext = addtext.slice(1);
 	if (addtext.charAt(addtext.length - 1) == '\n') addtext = addtext.slice(0, addtext.length - 1);
@@ -314,8 +454,8 @@ async function nginx() {
 	return text;
 }
 
-async function sendMessage(type, ip, add_data = "") {
-	if (BotToken !== '' && ChatID !== '') {
+async function sendMessage(type, ip, add_data = "", botToken = "", chatID = "") {
+	if (botToken !== '' && chatID !== '') {
 		let msg = "";
 		const response = await fetch(`http://ip-api.com/json/${ip}?lang=zh-CN`);
 		if (response.status == 200) {
@@ -325,7 +465,7 @@ async function sendMessage(type, ip, add_data = "") {
 			msg = `${type}\nIP: ${ip}\n<tg-spoiler>${add_data}`;
 		}
 
-		let url = "https://api.telegram.org/bot" + BotToken + "/sendMessage?chat_id=" + ChatID + "&parse_mode=HTML&text=" + encodeURIComponent(msg);
+		let url = "https://api.telegram.org/bot" + botToken + "/sendMessage?chat_id=" + chatID + "&parse_mode=HTML&text=" + encodeURIComponent(msg);
 		return fetch(url, {
 			method: 'get',
 			headers: {
@@ -338,9 +478,20 @@ async function sendMessage(type, ip, add_data = "") {
 }
 
 function base64Decode(str) {
-	const bytes = new Uint8Array(atob(str).split('').map(c => c.charCodeAt(0)));
+	const normalized = String(str || '').replace(/-/g, '+').replace(/_/g, '/').replace(/\s/g, '');
+	const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
+	const bytes = new Uint8Array(atob(padded).split('').map(c => c.charCodeAt(0)));
 	const decoder = new TextDecoder('utf-8');
 	return decoder.decode(bytes);
+}
+
+function base64Encode(str) {
+	const bytes = new TextEncoder().encode(String(str || ''));
+	let binary = '';
+	for (let i = 0; i < bytes.length; i += 0x8000) {
+		binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+	}
+	return btoa(binary);
 }
 
 async function MD5MD5(text) {
@@ -405,6 +556,23 @@ async function parseSubConfig(configUrl) {
 // 将 Clash 配置中的 inline rules 替换为 rule-providers 格式
 // 根据 rulesets 生成标准的 rule-providers + rules YAML 块
 // 当 subconverter 没有生成 rules 段时使用
+function createProviderName(url, usedNames) {
+	let baseName = '';
+	try {
+		const parsed = new URL(url);
+		baseName = safeDecodeURIComponent(parsed.pathname.split('/').pop() || 'ruleset');
+	} catch (_) {
+		baseName = String(url || '').split(/[/?#]/).filter(Boolean).pop() || 'ruleset';
+	}
+	baseName = baseName.replace(/\.(?:list|ya?ml|txt)$/i, '').toLowerCase();
+	baseName = baseName.replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'ruleset';
+	let providerName = baseName;
+	let suffix = 2;
+	while (usedNames.has(providerName)) providerName = `${baseName}_${suffix++}`;
+	usedNames.add(providerName);
+	return providerName;
+}
+
 function buildDefaultRules(rulesets, lineBreak) {
 	// 如果 rulesets 为空，使用内置的 ACL4SSR 规则集
 	const defaultRulesets = rulesets && rulesets.length > 0 ? rulesets : [
@@ -423,7 +591,7 @@ function buildDefaultRules(rulesets, lineBreak) {
 
 	const ruleProviders = {};
 	const newRules = [];
-	let providerIndex = 0;
+	const usedProviderNames = new Set();
 
 	for (const ruleset of defaultRulesets) {
 		if (ruleset.type === 'inline') {
@@ -436,11 +604,7 @@ function buildDefaultRules(rulesets, lineBreak) {
 				newRules.push('  - ' + ruleset.rule + ',' + ruleset.group);
 			}
 		} else if (ruleset.type === 'url') {
-			let providerName = ruleset.url.split('/').pop().replace(/\.list$|\.yaml$|\.txt$/i, '').toLowerCase();
-			if (ruleProviders[providerName]) {
-				providerName = providerName + '_' + providerIndex;
-			}
-			providerIndex++;
+			const providerName = createProviderName(ruleset.url, usedProviderNames);
 			ruleProviders[providerName] = {
 				type: 'http',
 				behavior: ruleset.behavior || 'classical',
@@ -477,7 +641,7 @@ function convertRulesToProviders(content, rulesets) {
 	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
 
 	// 如果 subconverter 没有生成 rules 段，追加一套默认 rule-providers + rules
-	if (!content.includes('\nrules:')) {
+	if (!/^rules:\s*$/m.test(content)) {
 		return content + lineBreak + buildDefaultRules(rulesets, lineBreak);
 	}
 	const lines = content.split(lineBreak);
@@ -503,7 +667,7 @@ function convertRulesToProviders(content, rulesets) {
 	// 生成 rule-providers 和新的 rules
 	const ruleProviders = {};
 	const newRules = [];
-	let providerIndex = 0;
+	const usedProviderNames = new Set();
 
 	for (const ruleset of rulesets) {
 		if (ruleset.type === 'inline') {
@@ -522,12 +686,7 @@ function convertRulesToProviders(content, rulesets) {
 			// 远程规则集 -> rule-provider
 			const url = ruleset.url;
 			// 从 URL 提取 provider 名称
-			let providerName = url.split('/').pop().replace(/\.list$|\.yaml$|\.txt$/i, '').toLowerCase();
-			// 确保名称唯一
-			if (ruleProviders[providerName]) {
-				providerName = providerName + '_' + providerIndex;
-			}
-			providerIndex++;
+			const providerName = createProviderName(url, usedProviderNames);
 
 			// 根据 URL 中的文件扩展名和路径判断 behavior
 			let behavior = ruleset.behavior || 'classical';  // 使用 INI 指定的 behavior，默认 classical
@@ -613,29 +772,11 @@ function restoreEmoji(content, nodeText) {
 
 	// 第1步：从原始链接构建 server:port → fullName 映射
 	const portToFullName = {};
-	for (const line of nodeText.split('\n')) {
-		const trimmed = line.trim();
-		if (!trimmed.startsWith('vless://') && !trimmed.startsWith('trojan://') &&
-		    !trimmed.startsWith('vmess://') && !trimmed.startsWith('ss://')) continue;
-		const hashIdx = trimmed.lastIndexOf('#');
-		if (hashIdx === -1) continue;
-		try {
-			const fullName = decodeURIComponent(trimmed.slice(hashIdx + 1)).trim();
-			if (!/[\u{1F1E0}-\u{1F1FF}]/u.test(fullName)) continue;
-			const atIdx = trimmed.indexOf('@');
-			const qIdx = trimmed.indexOf('?');
-			if (atIdx === -1) continue;
-			const hostPort = trimmed.slice(atIdx + 1, qIdx > -1 ? qIdx : hashIdx);
-			if (!portToFullName[hostPort]) portToFullName[hostPort] = fullName;
-			// IPv6 地址在原始链接中带方括号 [2400:...]:443，
-			// 但 subconverter 输出的 clash YAML 里 server 是裸 IPv6，port 单独字段，
-			// 拼出来的 key 是 2400:...:443（无方括号），额外存一份以便匹配。
-			const ipv6Match = hostPort.match(/^\[([^\]]+)\]:(\d+)$/);
-			if (ipv6Match) {
-				const bareKey = ipv6Match[1] + ':' + ipv6Match[2];
-				if (!portToFullName[bareKey]) portToFullName[bareKey] = fullName;
-			}
-		} catch (_) {}
+	const rawNodes = parseRawNodeMetadata(nodeText);
+	for (const node of rawNodes) {
+		if (!node.name || !/^[\u{1F1E0}-\u{1F1FF}]{2}/u.test(node.name)) continue;
+		const key = endpointKey(node.server, node.port);
+		if (key && !portToFullName[key]) portToFullName[key] = node.name;
 	}
 
 	if (Object.keys(portToFullName).length === 0) return content;
@@ -651,8 +792,8 @@ function restoreEmoji(content, nodeText) {
 
 	// 统计每个 fullName 在 portToFullName 中出现的次数（即同名节点数）
 	const fullNameCount = {};
-	for (const fn of Object.values(portToFullName)) {
-		fullNameCount[fn] = (fullNameCount[fn] || 0) + 1;
+	for (const node of rawNodes) {
+		if (node.name) fullNameCount[node.name] = (fullNameCount[node.name] || 0) + 1;
 	}
 
 	let section = '';
@@ -661,15 +802,13 @@ function restoreEmoji(content, nodeText) {
 		if (section !== 'proxies') continue;
 
 		// 提取 name、server、port
-		const nameMatch = line.match(/name:\s*"?([^",}\r\n]+)"?/);
-		const serverMatch = line.match(/server:\s*"?([^",}\r\n]+)"?/);
+		const name = extractYamlField(line, 'name');
+		const server = extractYamlField(line, 'server');
 		const portMatch = line.match(/port:\s*(\d+)/);
-		if (!nameMatch || !serverMatch || !portMatch) continue;
+		if (!name || !server || !portMatch) continue;
 
-		const name = nameMatch[1].trim();
-		const server = serverMatch[1].trim();
 		const port = portMatch[1].trim();
-		const key = `${server}:${port}`;
+		const key = endpointKey(server, port);
 
 		const fullName = portToFullName[key];
 		if (!fullName || fullName === name) continue;
@@ -708,15 +847,11 @@ function restoreEmoji(content, nodeText) {
 	const entries = Object.entries(nameMap).sort((a, b) => b[0].length - a[0].length);
 
 	for (const [oldName, fullName] of entries) {
-		// 替换 proxies 段 name 字段（单行格式 {name: xxx, ...}）
-		content = content.replaceAll(`name: ${oldName},`, `name: ${fullName},`);
-		content = content.replaceAll(`name: ${oldName}}`, `name: ${fullName}}`);
-		// 替换 proxy-groups 里的引用（行内换行）
-		content = content.replaceAll(`- ${oldName}${lineBreak}`, `- ${fullName}${lineBreak}`);
-		// 文件末尾无换行
-		if (content.endsWith(`- ${oldName}`)) {
-			content = content.slice(0, -(oldName.length + 2)) + `- ${fullName}`;
-		}
+		const escaped = oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		const namePattern = new RegExp(`(name:\\s*)(["']?)${escaped}\\2(?=\\s*[,}])`, 'g');
+		content = content.replace(namePattern, (_, prefix, quote) => `${prefix}${quote}${fullName}${quote}`);
+		const referencePattern = new RegExp(`(^\\s*-\\s*)(["']?)${escaped}\\2\\s*$`, 'gm');
+		content = content.replace(referencePattern, (_, prefix, quote) => `${prefix}${quote}${fullName}${quote}`);
 	}
 
 	return content;
@@ -743,9 +878,8 @@ function fixProxyGroups(content) {
 	for (const line of lines) {
 		if (TOP.test(line)) { section = line.split(':')[0].trim(); continue; }
 		if (section !== 'proxies') continue;
-		const nameMatch = line.match(/name:\s*"?([^",}\r\n]+)"?\s*[,}]/);
-		if (!nameMatch) continue;
-		const name = nameMatch[1].trim();
+		const name = extractYamlField(line, 'name');
+		if (!name) continue;
 		// 带 emoji 旗帜的节点名
 		if (/[\u{1F1E0}-\u{1F1FF}]/u.test(name)) {
 			allEmojiNames.add(name);
@@ -813,7 +947,7 @@ function fixProxyGroups(content) {
 		if (inGroupProxies) {
 			const lineIndent = line.match(/^(\s*)/)[1].length;
 			if (lineIndent >= proxiesIndent.length + 2 && trimmed.startsWith('- ')) {
-				const refName = trimmed.slice(2).trim();
+				const refName = parseYamlScalar(trimmed.slice(2));
 				// 如果是裸名且有对应的带 emoji 名，替换
 				if (emojiNameMap[refName]) {
 					result.push(line.replace(refName, emojiNameMap[refName]));
@@ -849,8 +983,8 @@ function removeGhostProxyRefs(content) {
 	for (const line of lines) {
 		if (TOP.test(line)) { section = line.split(':')[0].trim(); continue; }
 		if (section === 'proxies') {
-			const m = line.match(/name:\s*"?([^",}\r\n]+)"?\s*[,}]/);
-			if (m) realNames.add(m[1].trim());
+			const name = extractYamlField(line, 'name');
+			if (name) realNames.add(name);
 		}
 	}
 
@@ -861,8 +995,8 @@ function removeGhostProxyRefs(content) {
 		if (TOP.test(line)) { section = line.split(':')[0].trim(); continue; }
 		if (section === 'proxy-groups') {
 			// 匹配 "  - name: xxx" 或 "  - {name: xxx,"
-			const m = line.match(/^\s+- (?:name:|{name:)\s*"?([^",}\r\n]+)"?/);
-			if (m) groupNames.add(m[1].trim());
+			const name = extractYamlField(line, 'name');
+			if (name && /^\s+- (?:name:|\{name:)/.test(line)) groupNames.add(name);
 		}
 	}
 
@@ -909,7 +1043,7 @@ function removeGhostProxyRefs(content) {
 		if (inGroupProxies && trimmed.startsWith('- ')) {
 			const lineIndent = line.match(/^(\s*)/)[1].length;
 			if (lineIndent > proxiesIndent.length) {
-				const refName = trimmed.substring(2).trim();
+				const refName = parseYamlScalar(trimmed.substring(2));
 				const keep = realNames.has(refName) || groupNames.has(refName) || BUILTINS.has(refName);
 				if (!keep) {
 					console.log(`[removeGhostProxyRefs] 移除幽灵引用: "${refName}"`);
@@ -948,13 +1082,11 @@ function clashReinjectRegionGroups(content) {
 	for (const line of lines) {
 		if (TOP.test(line)) { section = line.split(':')[0].trim(); continue; }
 		if (section !== 'proxies') continue;
-		const m = line.match(/name:\s*"?([^",}\r\n]+)"?\s*[,}]/);
-		if (!m) continue;
-		const name = m[1].trim();
+		const name = extractYamlField(line, 'name');
+		if (!name) continue;
 		allProxyNames.push(name);
-		const flagMatch = name.match(/^([\u{1F1E0}-\u{1F1FF}]{2})/u);
-		if (flagMatch) {
-			const flag = flagMatch[1];
+		const flag = detectCountryFlag(name);
+		if (flag) {
 			if (!flagToProxyNames[flag]) flagToProxyNames[flag] = [];
 			flagToProxyNames[flag].push(name);
 		}
@@ -968,8 +1100,8 @@ function clashReinjectRegionGroups(content) {
 	for (const line of lines) {
 		if (TOP.test(line)) { section = line.split(':')[0].trim(); continue; }
 		if (section !== 'proxy-groups') continue;
-		const m = line.match(/^\s+- (?:name:|{name:)\s*"?([^",}\r\n]+)"?/);
-		if (m) groupNames.add(m[1].trim());
+		const name = extractYamlField(line, 'name');
+		if (name && /^\s+- (?:name:|\{name:)/.test(line)) groupNames.add(name);
 	}
 
 	const BUILTINS = new Set(['DIRECT', 'REJECT', 'GLOBAL', 'PASS']);
@@ -1031,13 +1163,12 @@ function clashReinjectRegionGroups(content) {
 		if (!(/^\s+- name:/.test(firstLine) || /^\s+- \{name:/.test(firstLine))) {
 			processedGroups.push(block); continue;
 		}
-		const nm = firstLine.match(/name:\s*"?([^",}\r\n]+)"?/);
-		if (!nm) { processedGroups.push(block); continue; }
-		const gName = nm[1].trim();
-		const flagM = gName.match(/^([\u{1F1E0}-\u{1F1FF}]{2})/u);
-		if (!flagM) { processedGroups.push(block); continue; } // 非地区分组，原样保留
+		const gName = extractYamlField(firstLine, 'name');
+		if (!gName) { processedGroups.push(block); continue; }
+		const groupFlag = detectCountryFlag(gName);
+		if (!groupFlag) { processedGroups.push(block); continue; } // 非地区分组，原样保留
 
-		const resolvedNames = resolveFlag(flagM[1]);
+		const resolvedNames = resolveFlag(groupFlag);
 		if (!resolvedNames) {
 			// 地区分组但无匹配节点 → 整块删除
 			deletedGroupNames.add(gName);
@@ -1056,7 +1187,7 @@ function clashReinjectRegionGroups(content) {
 				proxiesIndent = line.match(/^(\s*)/)[1];
 				newBlock.push(line);
 				const itemIndent = proxiesIndent + '  ';
-				for (const name of resolvedNames) newBlock.push(itemIndent + '- ' + name);
+				for (const name of resolvedNames) newBlock.push(itemIndent + '- ' + yamlQuote(name));
 				continue;
 			}
 			if (inProxies && trimmed.startsWith('- ')) {
@@ -1117,7 +1248,7 @@ function removeGhostGroupRefs(content, deletedGroupNames) {
 		if (inGroupProxies && trimmed.startsWith('- ')) {
 			const li = line.match(/^(\s*)/)[1].length;
 			if (li > proxiesIndent.length) {
-				const refName = trimmed.slice(2).trim();
+				const refName = parseYamlScalar(trimmed.slice(2));
 				if (deletedGroupNames.has(refName)) continue; // 删除引用
 				result.push(line); continue;
 			} else { inGroupProxies = false; }
@@ -1236,34 +1367,12 @@ function singboxRestoreEmoji(jsonStr, rawNodeText) {
 	}
 	if (!config.outbounds) return jsonStr;
 
-	const lines = (rawNodeText || '').split('\n');
-
 	// 构建 server:port → fullName 的映射（处理同名节点）
 	const portMap = {};
-	// 构建 裸名 → fullName 的映射（处理不同名节点的 fallback）
-	const nameMap = {};
-
-	for (const line of lines) {
-		const trimmed = line.trim();
-		if (!trimmed.startsWith('vless://') && !trimmed.startsWith('trojan://') &&
-		    !trimmed.startsWith('vmess://') && !trimmed.startsWith('ss://')) continue;
-		const hashIdx = trimmed.lastIndexOf('#');
-		if (hashIdx === -1) continue;
-		try {
-			const fullName = decodeURIComponent(trimmed.slice(hashIdx + 1)).trim();
-			const bareName = fullName.replace(/^[\u{1F1E0}-\u{1F1FF}\u{1F300}-\u{1F9FF}\s]+/u, '').trim();
-			if (!bareName || fullName === bareName) continue;
-
-			// 提取 server:port
-			const atIdx = trimmed.indexOf('@');
-			const qIdx = trimmed.indexOf('?');
-			if (atIdx > -1) {
-				const hostPort = trimmed.slice(atIdx + 1, qIdx > -1 ? qIdx : hashIdx);
-				if (!portMap[hostPort]) portMap[hostPort] = fullName;
-			}
-			// 裸名映射（只存第一个，同名后续会被序号区分）
-			if (!nameMap[bareName]) nameMap[bareName] = fullName;
-		} catch (_) {}
+	const rawNodes = parseRawNodeMetadata(rawNodeText).filter(node => /^[\u{1F1E0}-\u{1F1FF}]{2}/u.test(node.name));
+	for (const node of rawNodes) {
+		const key = endpointKey(node.server, node.port);
+		if (key && !portMap[key]) portMap[key] = node.name;
 	}
 
 	// subconverter 给同名节点加序号的规律：第一个保持原名，后续加 " 2"、" 3"...
@@ -1272,29 +1381,20 @@ function singboxRestoreEmoji(jsonStr, rawNodeText) {
 	const bareCount = {};
 	const seqMap = {}; // "wanxy 2" → "🇯🇵 wanxy"（带旗帜）
 
-	for (const line of lines) {
-		const trimmed = line.trim();
-		if (!trimmed.startsWith('vless://') && !trimmed.startsWith('trojan://') &&
-		    !trimmed.startsWith('vmess://') && !trimmed.startsWith('ss://')) continue;
-		const hashIdx = trimmed.lastIndexOf('#');
-		if (hashIdx === -1) continue;
-		try {
-			const fullName = decodeURIComponent(trimmed.slice(hashIdx + 1)).trim();
-			const bareName = fullName.replace(/^[\u{1F1E0}-\u{1F1FF}\u{1F300}-\u{1F9FF}\s]+/u, '').trim();
-			if (!bareName || fullName === bareName) continue;
-
-			bareCount[bareName] = (bareCount[bareName] || 0) + 1;
-			const seq = bareCount[bareName];
-			const seqKey = seq === 1 ? bareName : `${bareName} ${seq}`;
-			seqMap[seqKey] = fullName;
-		} catch (_) {}
+	for (const node of rawNodes) {
+		const bareName = node.name.replace(/^[\u{1F1E0}-\u{1F1FF}\u{1F300}-\u{1F9FF}\s]+/u, '').trim();
+		if (!bareName || node.name === bareName) continue;
+		bareCount[bareName] = (bareCount[bareName] || 0) + 1;
+		const seq = bareCount[bareName];
+		const seqKey = seq === 1 ? bareName : `${bareName} ${seq}`;
+		seqMap[seqKey] = node.name;
 	}
 
 	// 替换 outbounds 里的节点名
 	let restored = 0;
 	config.outbounds = config.outbounds.map(ob => {
 		if (!ob.tag) return ob;
-		const key = `${ob.server}:${ob.server_port}`;
+		const key = endpointKey(ob.server, ob.server_port);
 
 		// 优先用 server:port 精确匹配
 		if (portMap[key]) {
@@ -1341,10 +1441,7 @@ function singboxInjectNodes(nodesJson, templateJson) {
 	const allNodeTags = proxyNodes.map(n => n.tag);
 
 	// 从 tag 里提取旗帜（区域指示符对 U+1F1E0-U+1F1FF）
-	const getFlagFromTag = (tag) => {
-		const m = tag.match(/^([\u{1F1E0}-\u{1F1FF}]{2})/u);
-		return m ? m[1] : null;
-	};
+	const getFlagFromTag = (tag) => detectCountryFlag(tag);
 
 	// 按旗帜分类节点 tag
 	const flagToTags = {};
@@ -1355,6 +1452,8 @@ function singboxInjectNodes(nodesJson, templateJson) {
 			flagToTags[flag].push(node.tag);
 		}
 	}
+	const flagCompat = { '🇺🇲': '🇺🇸' };
+	const resolveFlagTags = flag => flagToTags[flag] || flagToTags[flagCompat[flag]] || null;
 
 	// 把代理节点插入模板（放在第一个 direct 之前）
 	const directIdx = template.outbounds.findIndex(ob => ob.type === 'direct');
@@ -1365,22 +1464,38 @@ function singboxInjectNodes(nodesJson, templateJson) {
 	}
 
 	// 遍历模板 outbounds，智能注入节点
+	const emptyRegionTags = new Set();
 	for (const ob of template.outbounds) {
 		if (!Array.isArray(ob.outbounds)) continue;
 
 		const groupFlag = getFlagFromTag(ob.tag);
+		const regionNodes = groupFlag ? resolveFlagTags(groupFlag) : null;
 
-		if (groupFlag && flagToTags[groupFlag]) {
+		if (groupFlag && regionNodes) {
 			// 地区组有匹配节点 → 精确注入
-			ob.outbounds = flagToTags[groupFlag];
-		} else if (groupFlag && !flagToTags[groupFlag]) {
-			// 地区组无匹配节点 → 全节点兜底（避免空数组报错）
-			ob.outbounds = allNodeTags;
+			ob.outbounds = regionNodes;
+		} else if (groupFlag) {
+			// 空地区组不能回填全部节点，否则会把其他国家节点错误标成该地区。
+			emptyRegionTags.add(ob.tag);
 		} else if (ob.type === 'urltest' || ob.type === 'loadbalance') {
 			// 无旗帜的 urltest/loadbalance（自动选择、负载均衡）→ 全节点
 			ob.outbounds = allNodeTags;
 		}
 		// selector 无旗帜（节点选择、Onedrive 等）→ 保持模板定义不变
+	}
+
+	if (emptyRegionTags.size > 0) {
+		template.outbounds = template.outbounds.filter(ob => !emptyRegionTags.has(ob.tag));
+		for (const ob of template.outbounds) {
+			if (!Array.isArray(ob.outbounds)) continue;
+			ob.outbounds = ob.outbounds.filter(tag => !emptyRegionTags.has(tag));
+			if (ob.outbounds.length === 0 && (ob.type === 'selector' || ob.type === 'urltest' || ob.type === 'loadbalance')) {
+				ob.outbounds = allNodeTags;
+			}
+		}
+		for (const rule of template.route?.rules || []) {
+			if (typeof rule.outbound === 'string' && emptyRegionTags.has(rule.outbound)) rule.outbound = 'direct';
+		}
 	}
 
 	console.log(`[singboxInjectNodes] 注入 ${proxyNodes.length} 个节点，旗帜分组: ${JSON.stringify(Object.keys(flagToTags))}`);
@@ -1403,20 +1518,15 @@ function singboxFix(jsonStr, rawNodeText) {
 		const trimmed = line.trim();
 		if (!trimmed.startsWith('vless://') && !trimmed.startsWith('trojan://')) continue;
 		try {
-			const atIdx = trimmed.indexOf('@');
-			if (atIdx === -1) continue;
-			const hashIdx = trimmed.lastIndexOf('#');
-			const urlPart = hashIdx > -1 ? trimmed.slice(0, hashIdx) : trimmed;
-			const qIdx = urlPart.indexOf('?');
-			if (qIdx === -1) continue;
-			const hostPort = urlPart.slice(atIdx + 1, qIdx);
-			const params = new URLSearchParams(urlPart.slice(qIdx + 1));
+			const parsed = new URL(trimmed);
+			const params = parsed.searchParams;
 			if (params.get('security') !== 'reality') continue;
 			const pbk = params.get('pbk');
 			const sid = params.get('sid') || '';
 			const sni = params.get('sni') || '';
 			const fp = params.get('fp') || 'chrome';
-			if (pbk) realityMap[hostPort] = { public_key: pbk, short_id: sid, server_name: sni, fingerprint: fp };
+			const key = endpointKey(parsed.hostname, parsed.port);
+			if (pbk && key) realityMap[key] = { public_key: pbk, short_id: sid, server_name: sni, fingerprint: fp };
 		} catch (_) {}
 	}
 
@@ -1426,16 +1536,12 @@ function singboxFix(jsonStr, rawNodeText) {
 		const trimmed = line.trim();
 		if (!trimmed.startsWith('vless://') && !trimmed.startsWith('trojan://')) continue;
 		try {
-			const atIdx = trimmed.indexOf('@');
-			if (atIdx === -1) continue;
-			const hashIdx = trimmed.lastIndexOf('#');
-			const urlPart = hashIdx > -1 ? trimmed.slice(0, hashIdx) : trimmed;
-			const qIdx = urlPart.indexOf('?');
-			if (qIdx === -1) continue;
-			const hostPort = urlPart.slice(atIdx + 1, qIdx);
-			const params = new URLSearchParams(urlPart.slice(qIdx + 1));
+			const parsed = new URL(trimmed);
+			const params = parsed.searchParams;
 			if (params.get('type') !== 'xhttp') continue;
-			xhttpMap[hostPort] = {
+			const key = endpointKey(parsed.hostname, parsed.port);
+			if (!key) continue;
+			xhttpMap[key] = {
 				path: params.get('path') || '/',
 				host: params.get('host') || params.get('sni') || '',
 				mode: params.get('mode') || 'auto',
@@ -1445,8 +1551,8 @@ function singboxFix(jsonStr, rawNodeText) {
 
 	// 修复2：过滤掉 xhttp 误转的 httpupgrade 节点（sing-box 不支持 xhttp）
 	config.outbounds = config.outbounds.filter(ob => {
-		const key = `${ob.server}:${ob.server_port}`;
-		if (ob.transport && ob.transport.type === 'httpupgrade' && xhttpMap[key]) {
+		const key = endpointKey(ob.server, ob.server_port);
+		if (xhttpMap[key]) {
 			console.log(`[singboxFix] 过滤 xhttp 节点: ${ob.tag}`);
 			return false;
 		}
@@ -1454,7 +1560,7 @@ function singboxFix(jsonStr, rawNodeText) {
 	});
 
 	config.outbounds = config.outbounds.map(ob => {
-		const key = `${ob.server}:${ob.server_port}`;
+		const key = endpointKey(ob.server, ob.server_port);
 
 		// 修复1：gRPC+REALITY 丢失 reality 块，同时补 utls（REALITY 需要 TLS 指纹伪装）
 		const isGrpc = ob.transport && ob.transport.type === 'grpc';
@@ -1489,10 +1595,15 @@ function singboxFix(jsonStr, rawNodeText) {
 	return JSON.stringify(config);
 }
 
-function fixMissingGrpcOpts(content) {
+function fixMissingGrpcOpts(content, rawNodeText = '') {
 	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
 	const lines = content.split(lineBreak);
 	const result = [];
+	const grpcServices = new Map(
+		parseRawNodeMetadata(rawNodeText)
+			.filter(node => node.transport === 'grpc')
+			.map(node => [endpointKey(node.server, node.port), node.serviceName || ''])
+	);
 
 	for (const line of lines) {
 		// 只处理 proxies 段的单行节点（以 "  - {" 开头，含 network: grpc，不含 grpc-opts）
@@ -1500,7 +1611,9 @@ function fixMissingGrpcOpts(content) {
 			line.includes('network: grpc') &&
 			!line.includes('grpc-opts')) {
 			// 在行尾 } 前插入 grpc-opts
-			const fixed = line.replace(/,?\s*\}$/, ', grpc-opts: {grpc-mode: gun, grpc-service-name: ""}}');
+			const key = endpointKey(extractYamlField(line, 'server'), line.match(/port:\s*(\d+)/)?.[1]);
+			const serviceName = grpcServices.get(key) || '';
+			const fixed = line.replace(/,?\s*\}$/, `, grpc-opts: {grpc-mode: gun, grpc-service-name: ${yamlQuote(serviceName)}}}`);
 			result.push(fixed);
 		} else {
 			result.push(line);
@@ -1509,7 +1622,7 @@ function fixMissingGrpcOpts(content) {
 	return result.join(lineBreak);
 }
 
-function clashFix(content) {
+function clashFix(content, rawNodeText = '') {
 	// ===== 最优先：修复 subconverter 输出的 proxy-groups 结构错误 =====
 	// subconverter 存在 bug：proxy-groups 中每个组末尾多一个空的 proxies:，
 	// 且部分组的节点列表游离在 proxies: 标头之外，导致 yaml 结构混乱无法使用。
@@ -1541,7 +1654,7 @@ function clashFix(content) {
 	// ===== 修复1：移除 xhttp 传输协议的节点（Clash/Mihomo 不支持 xhttp）=====
 	// xhttp 是 Xray 专有协议，subconverter 会将其错误转换为 h2，导致连接失败
 	// 此类节点请使用 v2rayN / NekoBox 等 Xray 内核客户端
-	content = removeXhttpProxies(content);
+	content = removeXhttpProxies(content, rawNodeText);
 
 	// ===== 修复2：gRPC service-name 为空时被错误写成 "/" 的问题 =====
 	// 原始节点 serviceName= 为空，转换后应为 "" 而非 "/"
@@ -1549,7 +1662,7 @@ function clashFix(content) {
 
 	// ===== 修复3：为 network: grpc 但缺少 grpc-opts 的节点补上 grpc-opts =====
 	// subconverter 转换 Trojan+gRPC 时有时会丢失 grpc-opts，Mihomo 需要此字段
-	content = fixMissingGrpcOpts(content);
+	content = fixMissingGrpcOpts(content, rawNodeText);
 
 	// ===== 修复4：Trojan/VLESS + gRPC + REALITY 节点 reality-opts 丢失问题 =====
 	// subconverter 在转换 Trojan+gRPC+REALITY 时可能丢失 reality-opts，
@@ -1691,40 +1804,33 @@ function injectRealityOpts(clashContent, rawNodeText) {
 	return result.join(lineBreak);
 }
 
-// 从 proxies 段中移除使用 h2 network 且名称来自 xhttp 转换的节点
-// 判断依据：subconverter 将 xhttp 错误映射为 network: h2，同时带有 reality-opts
-// 真正的 h2+reality 节点极少见，为安全起见仅移除同时满足以下条件的：
-//   1. network: h2（或 network: h2,）
-//   2. 带有 reality-opts
-//   3. h2-opts 中存在 path 字段（xhttp 有 path，纯 h2 极少带 path+reality 组合）
-// 从顶级 proxies: 段中移除 xhttp 误转节点（network: h2 + reality-opts + h2-opts path 同时存在）
-// 只处理顶级 proxies: 段，不碰 proxy-groups
-function removeXhttpProxies(content) {
+// 只按原始 xhttp 节点的 server:port 精确移除误转节点，避免误删正常 h2 或 gRPC+REALITY。
+// 只处理顶级 proxies: 段，不碰 proxy-groups。
+function removeXhttpProxies(content, rawNodeText = '') {
 	const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
 	const lines = content.split(lineBreak);
 	const TOP = /^[a-zA-Z][a-zA-Z0-9_-]*:/;
 	const result = [];
 	let topSection = '';
 	let blockLines = [];
+	const xhttpEndpoints = new Set(
+		parseRawNodeMetadata(rawNodeText)
+			.filter(node => node.transport === 'xhttp')
+			.map(node => endpointKey(node.server, node.port))
+			.filter(Boolean)
+	);
 
 	const flushBlock = () => {
 		if (!blockLines.length) return;
 		const blockStr = blockLines.join(lineBreak);
-		// xhttp 误转为 h2 的节点（Mihomo 不支持 xhttp）
-		const isXhttp = /network:\s*h2/.test(blockStr)
-			&& /reality-opts/.test(blockStr)
-			&& /h2-opts/.test(blockStr)
-			&& /path:/.test(blockStr);
+		const server = blockStr.match(/server:\s*["']?([^,"'}\r\n]+)/)?.[1]?.trim();
+		const port = blockStr.match(/port:\s*(\d+)/)?.[1];
+		const isXhttp = xhttpEndpoints.has(endpointKey(server, port));
 
-		// gRPC + REALITY 节点（Mihomo 有已知 bug，timeout，过滤掉）
-		const isGrpcReality = /network:\s*grpc/.test(blockStr)
-			&& /reality-opts/.test(blockStr);
-
-		if (!isXhttp && !isGrpcReality) {
+		if (!isXhttp) {
 			result.push(...blockLines);
 		} else {
-			const reason = isXhttp ? 'xhttp 误转节点' : 'gRPC+REALITY（Mihomo 不兼容）';
-			console.log(`[removeXhttpProxies] 已移除 ${reason}: ${blockStr.match(/name:\s*["']?([^"',}\r\n]+)/)?.[1] || ''}`);
+			console.log(`[removeXhttpProxies] 已移除 xhttp 误转节点: ${blockStr.match(/name:\s*["']?([^"',}\r\n]+)/)?.[1] || ''}`);
 		}
 		blockLines = [];
 	};
@@ -1765,21 +1871,21 @@ function removeXhttpProxies(content) {
 	return result.join(lineBreak);
 }
 
-async function getSUB(api, request, 追加UA, userAgentHeader) {
+async function getSUB(api, request, 追加UA, userAgentHeader, timeoutMs = 8000) {
 	if (!api || api.length === 0) {
-		return [];
+		return [[], ''];
 	} else api = [...new Set(api)]; // 去重
 	let newapi = "";
-	let 订阅转换URLs = "";
+	const 订阅转换URLs = [];
 	let 异常订阅 = "";
 	const controller = new AbortController(); // 创建一个AbortController实例，用于取消请求
 	const timeout = setTimeout(() => {
-		controller.abort(); // 2秒后取消所有请求
-	}, 2000);
+		controller.abort();
+	}, timeoutMs);
 
 	try {
 		// 使用Promise.allSettled等待所有API请求完成，无论成功或失败
-		const responses = await Promise.allSettled(api.map(apiUrl => getUrl(request, apiUrl, 追加UA, userAgentHeader).then(response => response.ok ? response.text() : Promise.reject(response))));
+		const responses = await Promise.allSettled(api.map(apiUrl => getUrl(request, apiUrl, 追加UA, userAgentHeader, controller.signal).then(response => response.ok ? response.text() : Promise.reject(response))));
 
 		// 遍历所有响应
 		const modifiedResponses = responses.map((response, index) => {
@@ -1813,12 +1919,12 @@ async function getSUB(api, request, 追加UA, userAgentHeader) {
 			// 检查响应状态是否为'fulfilled'
 			if (response.status === 'fulfilled') {
 				const content = await response.value || 'null'; // 获取响应的内容
-				if (content.includes('proxies:')) {
+				if (/^proxies:\s*$/m.test(content)) {
 					//console.log('Clash订阅: ' + response.apiUrl);
-					订阅转换URLs += "|" + response.apiUrl; // Clash 配置
-				} else if (content.includes('outbounds"') && content.includes('inbounds"')) {
+					订阅转换URLs.push(response.apiUrl); // Clash 配置
+				} else if (isSingBoxConfig(content)) {
 					//console.log('Singbox订阅: ' + response.apiUrl);
-					订阅转换URLs += "|" + response.apiUrl; // Singbox 配置
+					订阅转换URLs.push(response.apiUrl); // Singbox 配置
 				} else if (content.includes('://')) {
 					//console.log('明文订阅: ' + response.apiUrl);
 					newapi += content + '\n'; // 追加内容
@@ -1826,7 +1932,7 @@ async function getSUB(api, request, 追加UA, userAgentHeader) {
 					//console.log('Base64订阅: ' + response.apiUrl);
 					newapi += base64Decode(content) + '\n'; // 解码并追加内容
 				} else {
-					const 异常订阅LINK = `trojan://CMLiussss@127.0.0.1:8888?security=tls&allowInsecure=1&type=tcp&headerType=none#%E5%BC%82%E5%B8%B8%E8%AE%A2%E9%98%85%20${response.apiUrl.split('://')[1].split('/')[0]}`;
+					const 异常订阅LINK = `trojan://CMLiussss@127.0.0.1:8888?security=tls&allowInsecure=1&type=tcp&headerType=none#${encodeURIComponent('异常订阅 ' + getUrlHost(response.apiUrl))}`;
 					console.log('异常订阅: ' + 异常订阅LINK);
 					异常订阅 += `${异常订阅LINK}\n`;
 				}
@@ -1840,10 +1946,10 @@ async function getSUB(api, request, 追加UA, userAgentHeader) {
 
 	const 订阅内容 = await ADD(newapi + 异常订阅); // 将处理后的内容转换为数组
 	// 返回处理后的结果
-	return [订阅内容, 订阅转换URLs];
+	return [订阅内容, 订阅转换URLs.join('|')];
 }
 
-async function getUrl(request, targetUrl, 追加UA, userAgentHeader) {
+async function getUrl(request, targetUrl, 追加UA, userAgentHeader, signal) {
 	// 设置自定义 User-Agent
 	const newHeaders = new Headers(request.headers);
 	newHeaders.set("User-Agent", `${atob('djJyYXlOLzYuNDU=')} cmliu/CF-Workers-SUB ${追加UA}(${userAgentHeader})`);
@@ -1854,6 +1960,7 @@ async function getUrl(request, targetUrl, 追加UA, userAgentHeader) {
 		headers: newHeaders,
 		body: request.method === "GET" ? null : request.body,
 		redirect: "follow",
+		signal,
 		cf: {
 			// 忽略SSL证书验证
 			insecureSkipVerify: true,
@@ -1864,21 +1971,37 @@ async function getUrl(request, targetUrl, 追加UA, userAgentHeader) {
 		}
 	});
 
-	// 输出请求的详细信息
-	console.log(`请求URL: ${targetUrl}`);
-	console.log(`请求头: ${JSON.stringify([...newHeaders])}`);
-	console.log(`请求方法: ${request.method}`);
-	console.log(`请求体: ${request.method === "GET" ? null : request.body}`);
-
 	// 发送请求并返回响应
 	return fetch(modifiedRequest);
 }
 
 function isValidBase64(str) {
 	// 先移除所有空白字符(空格、换行、回车等)
-	const cleanStr = str.replace(/\s/g, '');
-	const base64Regex = /^[A-Za-z0-9+/=]+$/;
-	return base64Regex.test(cleanStr);
+	const cleanStr = String(str || '').replace(/\s/g, '').replace(/-/g, '+').replace(/_/g, '/');
+	if (!cleanStr || cleanStr.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(cleanStr)) return false;
+	try {
+		atob(cleanStr + '='.repeat((4 - cleanStr.length % 4) % 4));
+		return true;
+	} catch (_) {
+		return false;
+	}
+}
+
+function isSingBoxConfig(content) {
+	try {
+		const config = JSON.parse(content);
+		return Array.isArray(config.outbounds) || Array.isArray(config.inbounds);
+	} catch (_) {
+		return false;
+	}
+}
+
+function getUrlHost(value) {
+	try {
+		return new URL(value).host;
+	} catch (_) {
+		return 'unknown';
+	}
 }
 
 async function 迁移地址列表(env, txt = 'ADD.txt') {
@@ -1895,8 +2018,16 @@ async function 迁移地址列表(env, txt = 'ADD.txt') {
 	return false;
 }
 
-async function KV(request, env, txt = 'ADD.txt', guest) {
+async function KV(request, env, txt = 'ADD.txt', guest, config = {}) {
 	const url = new URL(request.url);
+	const {
+		fileName = DEFAULT_FILE_NAME,
+		mytoken = DEFAULT_TOKEN,
+		sbConfig = DEFAULT_SB_CONFIG,
+		subProtocol = 'https',
+		subConverter = DEFAULT_SUB_CONVERTER,
+		subConfig = DEFAULT_SUB_CONFIG,
+	} = config;
 	try {
 		// POST请求处理
 		if (request.method === "POST") {
@@ -1928,7 +2059,7 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 			<!DOCTYPE html>
 			<html>
 				<head>
-					<title>${FileName} 订阅编辑</title>
+					<title>${fileName} 订阅编辑</title>
 					<meta charset="utf-8">
 					<meta name="viewport" content="width=device-width, initial-scale=1">
 					<style>
@@ -2046,7 +2177,7 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 					SBCONFIG（sing-box JSON模板）: <strong>${sbConfig || '未设置'}</strong><br>
 					---------------------------------------------------------------<br>
 					################################################################<br>
-					${FileName} 汇聚订阅编辑: 
+					${fileName} 汇聚订阅编辑:
 					<div class="editor-container">
 						${hasKV ? `
 						<textarea class="editor" 
